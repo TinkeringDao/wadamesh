@@ -30,6 +30,10 @@ on:
 permissions:
   contents: write          # create the Release + upload assets (nothing more)
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -39,6 +43,8 @@ jobs:
       HAS_VPS: ${{ secrets.WADAMESH_VPS_SSH_KEY != '' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
