@@ -18,6 +18,7 @@ jobs:
       - name: Checkout PR Branch with Full History
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -27,6 +28,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "=== Gate 1: OPSEC & Zero-PII Scan ==="
+          git fetch origin "${BASE_REF}" --depth=50
           CHANGED_FILES=$(git diff --name-only "origin/${BASE_REF}...HEAD" | grep -v '^.github/workflows/autonomous-pr-review.yml$' || true)
           if [ -z "${CHANGED_FILES}" ]; then
             echo "No changed files outside workflow definition."
@@ -49,7 +51,7 @@ jobs:
         run: |
           set -euo pipefail
           echo "=== Gate 2: SSH Commit Signature Verification ==="
-          COMMITS=$(git rev-list "origin/${BASE_REF}..HEAD")
+          COMMITS=$(git rev-list --no-merges "origin/${BASE_REF}..HEAD")
           if [ -z "${COMMITS}" ]; then
             echo "::error::No commits found in PR range origin/${BASE_REF}..HEAD"
             exit 1
