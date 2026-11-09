@@ -63,6 +63,25 @@ static const Zone ZONES[] = {
   /* 39 */ { "Argentina (ART)",         "<-03>3" },
   /* 40 */ { "Mexico City (CST)",       "CST6" },                           // no DST since 2022
   /* 41 */ { "Newfoundland (NST/NDT)",  "NST3:30NDT,M3.2.0,M11.1.0" },
+  // ---- appended 2026-11: major city entries with automatic POSIX DST rules ----
+  /* 42 */ { "Berlin / Munich (CET)",   "CET-1CEST,M3.5.0,M10.5.0/3" },
+  /* 43 */ { "Paris / Brussels (CET)",  "CET-1CEST,M3.5.0,M10.5.0/3" },
+  /* 44 */ { "Vienna / Zurich (CET)",   "CET-1CEST,M3.5.0,M10.5.0/3" },
+  /* 45 */ { "Amsterdam (CET/CEST)",    "CET-1CEST,M3.5.0,M10.5.0/3" },
+  /* 46 */ { "Rome / Madrid (CET)",     "CET-1CEST,M3.5.0,M10.5.0/3" },
+  /* 47 */ { "Warsaw / Prague (CET)",   "CET-1CEST,M3.5.0,M10.5.0/3" },
+  /* 48 */ { "Stockholm / Oslo (CET)",  "CET-1CEST,M3.5.0,M10.5.0/3" },
+  /* 49 */ { "London / Dublin (GMT)",   "GMT0BST,M3.5.0/1,M10.5.0" },
+  /* 50 */ { "Lisbon (WET/WEST)",       "WET0WEST,M3.5.0/1,M10.5.0" },
+  /* 51 */ { "Athens / Helsinki (EET)", "EET-2EEST,M3.5.0/3,M10.5.0/4" },
+  /* 52 */ { "Kyiv / Bucharest (EET)",  "EET-2EEST,M3.5.0/3,M10.5.0/4" },
+  /* 53 */ { "New York / Toronto (ET)", "EST5EDT,M3.2.0,M11.1.0" },
+  /* 54 */ { "Chicago / Dallas (CT)",   "CST6CDT,M3.2.0,M11.1.0" },
+  /* 55 */ { "Denver / Calgary (MT)",   "MST7MDT,M3.2.0,M11.1.0" },
+  /* 56 */ { "Los Angeles (PT)",        "PST8PDT,M3.2.0,M11.1.0" },
+  /* 57 */ { "Tokyo (JST)",             "JST-9" },
+  /* 58 */ { "Seoul (KST)",             "KST-9" },
+  /* 59 */ { "Auckland (NZST/NZDT)",    "NZST-12NZDT,M9.5.0,M4.1.0/3" },
 };
 static const int ID_N   = (int)(sizeof(ZONES) / sizeof(ZONES[0]));   // valid stored ids: 0..ID_N-1
 static const int CUSTOM = 16;                                        // the Custom id, fixed forever
@@ -70,11 +89,12 @@ static_assert(CUSTOM < ID_N, "Custom must be a ZONES entry");
 
 // What the picker shows, top to bottom: west to east by standard time, Custom last.
 static const uint8_t PICK_ORDER[] = {
-   9,  8,  7,  5,  6,  4, 40,  3, 10, 41, 11, 39,          // UTC-10 .. UTC-3
-   2,  1, 23,  0, 20,                                       // UTC+0, UTC+1
-  22, 21, 17, 18,                                           // UTC+2
-  24, 25, 26, 19, 27, 28, 29, 12, 30, 31, 32,               // UTC+3 .. UTC+7
-  13, 33, 34, 14, 35, 36, 15, 37, 38,                       // UTC+8 .. UTC+12
+   9,  8,  7, 56,  5, 55,  6,  4, 54, 40,  3, 53, 10, 41, 11, 39,  // UTC-10 .. UTC-3
+   2,  1, 49, 23, 50,                                               // UTC+0
+  42, 43, 44, 45, 46, 47, 48,  0, 20,                               // UTC+1 (Berlin & EU cities first)
+  51, 52, 22, 21, 17, 18,                                           // UTC+2
+  24, 25, 26, 19, 27, 28, 29, 12, 30, 31, 32,                       // UTC+3 .. UTC+7
+  13, 33, 34, 14, 57, 35, 58, 36, 15, 37, 38, 59,                   // UTC+8 .. UTC+12
   CUSTOM,
 };
 static const int COUNT = (int)(sizeof(PICK_ORDER) / sizeof(PICK_ORDER[0]));   // picker rows
@@ -84,6 +104,15 @@ static_assert(COUNT == ID_N, "every zone id must appear in PICK_ORDER exactly on
 inline int idAt(int row) { return (row >= 0 && row < COUNT) ? PICK_ORDER[row] : 0; }
 
 inline const char* label(int id) { return (id >= 0 && id < ID_N) ? ZONES[id].label : ""; }
+
+// True when zone id `id` carries POSIX automatic daylight-saving transition rules (`,M...`).
+inline bool hasAutoDst(int id) {
+  if (id < 0 || id >= ID_N || !ZONES[id].posix) return false;
+  for (const char* p = ZONES[id].posix; *p; ++p) {
+    if (*p == ',') return true;
+  }
+  return false;
+}
 
 // The saved tz_zone byte -> the id in force. 0xFE is the v2->v3 migration sentinel (a user
 // who had a manual hour offset becomes Custom); anything past the list (garbage, or a newer

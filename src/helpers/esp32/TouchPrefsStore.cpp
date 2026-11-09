@@ -178,7 +178,11 @@ static void cfgSetDefaults(TouchCfg& c) {
   c.console_mode      = 0;      // OFF: boot into the graphical UI (CONSOLE_MODE.md)
   c.console_monitor   = 1;      // ON: the console shows messages as they arrive
   c.kb_force_legacy   = 0;      // OFF: detect the keyboard protocol automatically
+#if defined(HAS_THINKNODE_M9)
+  c.boot_wifi_time    = 1;      // ON on M9: physical power switch cuts battery to PCF8563
+#else
   c.boot_wifi_time    = 0;      // OFF: no cold-boot Wi-Fi time sync (#383) — opt-in
+#endif
   c.boot_wifi_open    = 0;      // OFF: and never a saved OPEN network even then
   c.loud_alerts       = 0;      // OFF: the standard chime pitch unless asked for
   c.theme_mode        = 0;      // Night: preserves the existing firmware appearance
@@ -842,6 +846,7 @@ bool touchPrefsSetTimeOffsetHours(int hours) {
 int touchPrefsTimezoneCount() { return TimeZones::COUNT; }
 int touchPrefsTimezoneAt(int row) { return TimeZones::idAt(row); }
 const char* touchPrefsTimezoneLabel(int id) { return TimeZones::label(id); }
+bool touchPrefsTimezoneHasAutoDst(int id) { return TimeZones::hasAutoDst(id); }
 
 uint8_t touchPrefsGetTimezone() {
   if (!s_begun) touchPrefsBegin();

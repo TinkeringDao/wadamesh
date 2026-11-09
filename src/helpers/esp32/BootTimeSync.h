@@ -70,6 +70,11 @@ const char* bootTimeSyncResultName(BootTimeSyncResult r);
 // the one guarded path.
 BootTimeSyncResult bootTimeSyncRun(bool clock_is_current, uint32_t& out_epoch);
 
+// On-demand bounded Wi-Fi SNTP acquisition over saved credentials when Wi-Fi
+// is currently off (used by Settings > Clock > "Sync clock"). Leaves Wi-Fi off
+// afterwards.
+BootTimeSyncResult bootTimeSyncAcquire(uint32_t& out_epoch);
+
 // Bounded SNTP acquisition, factored out of main.cpp's open-ended loop block so
 // it can simply be called. Assumes an association already exists. Starts
 // pool.ntp.org / time.google.com, polls until a sane epoch or the budget runs

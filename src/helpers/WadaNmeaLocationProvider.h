@@ -364,8 +364,9 @@ public:
         // RTC stamps our adverts as decades old so peers reject them as stale,
         // and it clobbers a good NTP time (re-syncing every 30 min). Keep
         // _time_sync_needed set so we retry once a real date lands.
-        if (_clock != NULL && nmea.getYear() >= 2020) {
-          _clock->setCurrentTime(getTimestamp());
+        const long ts = getTimestamp();
+        if (_clock != NULL && nmea.getYear() >= 2026 && ts > 1772323200L) {
+          _clock->setCurrentTime((uint32_t)ts);
           _time_sync_needed = false;
           _last_time_sync = millis();
         }

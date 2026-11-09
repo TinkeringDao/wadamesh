@@ -82,7 +82,8 @@ int main() {
       const int o = zoneOffset(TimeZones::idAt(r), 0, JAN);   // January: standard time in the north
       const int std_o = (TimeZones::idAt(r) == indexOf("Sydney (AEST/AEDT)") ||
                          TimeZones::idAt(r) == indexOf("Adelaide (ACST/ACDT)") ||
-                         TimeZones::idAt(r) == indexOf("New Zealand (NZST/NZDT)")) ? o - 60 : o;
+                         TimeZones::idAt(r) == indexOf("New Zealand (NZST/NZDT)") ||
+                         TimeZones::idAt(r) == indexOf("Auckland (NZST/NZDT)")) ? o - 60 : o;
       assert(std_o >= prev);
       prev = std_o;
     }
@@ -132,6 +133,25 @@ int main() {
     { "Argentina (ART)",        -180, -180, -180 },
     { "Mexico City (CST)",      -360, -360, -360 },
     { "Newfoundland (NST/NDT)", -210, -150, -150 },
+    // appended city entries (ids 42+)
+    { "Berlin / Munich (CET)",    60,  120,   60 },
+    { "Paris / Brussels (CET)",   60,  120,   60 },
+    { "Vienna / Zurich (CET)",    60,  120,   60 },
+    { "Amsterdam (CET/CEST)",     60,  120,   60 },
+    { "Rome / Madrid (CET)",      60,  120,   60 },
+    { "Warsaw / Prague (CET)",    60,  120,   60 },
+    { "Stockholm / Oslo (CET)",   60,  120,   60 },
+    { "London / Dublin (GMT)",     0,   60,    0 },
+    { "Lisbon (WET/WEST)",         0,   60,    0 },
+    { "Athens / Helsinki (EET)", 120,  180,  120 },
+    { "Kyiv / Bucharest (EET)",  120,  180,  120 },
+    { "New York / Toronto (ET)",-300, -240, -240 },
+    { "Chicago / Dallas (CT)",  -360, -300, -300 },
+    { "Denver / Calgary (MT)",  -420, -360, -360 },
+    { "Los Angeles (PT)",       -480, -420, -420 },
+    { "Tokyo (JST)",             540,  540,  540 },
+    { "Seoul (KST)",             540,  540,  540 },
+    { "Auckland (NZST/NZDT)",    780,  720,  780 },
   };
   static_assert(sizeof(want) / sizeof(want[0]) == (size_t)TimeZones::ID_N - 1, "a zone without a test row");
   for (auto& w : want) {
@@ -141,12 +161,15 @@ int main() {
     assert(zoneOffset(z, 0, JAN) == w.jan);
     assert(zoneOffset(z, 0, JUL) == w.jul);
     assert(zoneOffset(z, 0, OCT26) == w.oct26);
+    assert(TimeZones::hasAutoDst(z) == (w.jan != w.jul));
   }
+  assert(!TimeZones::hasAutoDst(TimeZones::CUSTOM) && !TimeZones::hasAutoDst(-1) && !TimeZones::hasAutoDst(999));
 
-  // DST edges to the minute: US 2026-03-08 07:00Z, EU 2026-03-29 01:00Z.
-  const int us = indexOf("US Eastern"), eu = indexOf("Europe (CET/CEST)");
+  // DST edges to the minute: US 2026-03-08 07:00Z, EU/Berlin 2026-03-29 01:00Z.
+  const int us = indexOf("US Eastern"), eu = indexOf("Europe (CET/CEST)"), berlin = indexOf("Berlin / Munich (CET)");
   assert(zoneOffset(us, 0, 1772953200 - 60) == -300 && zoneOffset(us, 0, 1772953200) == -240);
   assert(zoneOffset(eu, 0, 1774746000 - 60) ==   60 && zoneOffset(eu, 0, 1774746000) ==  120);
+  assert(zoneOffset(berlin, 0, 1774746000 - 60) == 60 && zoneOffset(berlin, 0, 1774746000) == 120);
   // Egypt 2026: summer time from Fri 24 Apr 00:00 local (23 Apr 22:00Z) to the end of
   // Thu 29 Oct (24:00 EEST = 29 Oct 21:00Z).
   const int eg = indexOf("Egypt (EET/EEST)");

@@ -41,6 +41,7 @@ const char* bootTimeSyncResultName(BootTimeSyncResult r) {
 #if !BOOT_TIME_SYNC_SUPPORTED
 
 bool bootTimeSyncSntp(uint32_t, uint32_t&) { return false; }
+BootTimeSyncResult bootTimeSyncAcquire(uint32_t&) { return BootTimeSyncResult::Skipped; }
 BootTimeSyncResult bootTimeSyncRun(bool, uint32_t&) { return BootTimeSyncResult::Skipped; }
 
 #else
@@ -204,16 +205,13 @@ void radioOff() {
 
 }  // namespace
 
-BootTimeSyncResult bootTimeSyncRun(bool clock_is_current, uint32_t& out_epoch) {
-  if (clock_is_current) return BootTimeSyncResult::Skipped;
-  if (!touchPrefsGetBootWifiTime()) return BootTimeSyncResult::Skipped;
-
-  // A soft reboot keeps ESP32 RTC time, so there is nothing to fetch and no
-  // reason to make the user wait. Only a genuine power-on gets the session.
-  if (esp_reset_reason() != ESP_RST_POWERON) return BootTimeSyncResult::Skipped;
-
-  // Wi-Fi already on: the normal connection state machine and its SNTP path
-  // handle this boot. Do not race them.
+BootTimeSyncResult bootTimeSyncAcquire(uint32_t& out_epoch) {
+  if (WiFi.status() == WL_CONNECTED) {
+    uint32_t epoch = 0;
+    if (!bootTimeSyncSntp(6000, epoch)) return BootTimeSyncResult::NoTime;
+    out_epoch = epoch;
+    return BootTimeSyncResult::Ok;
+  }
   if (wifiConfigWantsWifi()) return BootTimeSyncResult::Skipped;
 
   const uint32_t deadline_ms = millis() + kBootTimeSyncTotalMs;
@@ -262,6 +260,17 @@ BootTimeSyncResult bootTimeSyncRun(bool clock_is_current, uint32_t& out_epoch) {
   if (!got) return BootTimeSyncResult::NoTime;
   out_epoch = epoch;
   return BootTimeSyncResult::Ok;
+}
+
+BootTimeSyncResult bootTimeSyncRun(bool clock_is_current, uint32_t& out_epoch) {
+  if (clock_is_current) return BootTimeSyncResult::Skipped;
+  if (!touchPrefsGetBootWifiTime()) return BootTimeSyncResult::Skipped;
+
+  // Wi-Fi already on: the normal connection state machine and its SNTP path
+  // handle this boot. Do not race them.
+  if (wifiConfigWantsWifi()) return BootTimeSyncResult::Skipped;
+
+  return bootTimeSyncAcquire(out_epoch);
 }
 
 #endif  // BOOT_TIME_SYNC_SUPPORTED

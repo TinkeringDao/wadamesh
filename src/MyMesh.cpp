@@ -2975,6 +2975,22 @@ void MyMesh::onContactsFull() {
 }
 
 void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) {
+  // Bootstrap an unsynced clock (Seed or Floor after power loss) from an Ed25519-verified
+  // advertisement timestamp so standalone nodes acquire wall time from the first heard
+  // repeater or peer without waiting for a chat message.
+#if defined(ESP32)
+  if (!rtc_clock.timeIsCurrent() &&
+      contact.last_advert_timestamp > ClockFloorRTC::MIN_VALID_EPOCH &&
+      contact.last_advert_timestamp <= ClockFloorRTC::MAX_PLAUSIBLE_EPOCH &&
+      contact.last_advert_timestamp > getRTCClock()->getCurrentTime()) {
+    getRTCClock()->setCurrentTime(contact.last_advert_timestamp);
+  }
+#else
+  if (contact.last_advert_timestamp > 1772323200UL && contact.last_advert_timestamp < 2000000000UL &&
+      getRTCClock()->getCurrentTime() <= 1772323200UL) {
+    getRTCClock()->setCurrentTime(contact.last_advert_timestamp);
+  }
+#endif
   if (_serial->isConnected()) {
     if (is_new) {
       writeContactRespFrame(PUSH_CODE_NEW_ADVERT, contact, true);
@@ -3223,14 +3239,22 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
 void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt,
                           uint32_t sender_timestamp, const uint8_t *extra, int extra_len, const char *text) {
   // Clock bootstrap from a peer's send-time when we have no real clock of our own (Wi-Fi
-  // and GPS off, or not yet synced). Reliable by construction: adopt ONLY a sane epoch
-  // (~2023..2033, so the 1902/0 garbage and absurd-future values are ignored), and ONLY
-  // while our own clock still reads unset — NTP/GPS override it the instant they sync, and
-  // a clock that already reads real is never moved by the mesh.
-  if (sender_timestamp > 1700000000UL && sender_timestamp < 2000000000UL &&
-      getRTCClock()->getCurrentTime() < 1700000000UL) {
+  // and GPS off, or not yet synced). MeshCore 1.18 seeds the unset ESP32 clock at
+  // ClockFloorRTC::MIN_VALID_EPOCH (1772323200), so check !rtc_clock.timeIsCurrent()
+  // rather than the legacy < 1700000000 threshold.
+#if defined(ESP32)
+  if (!rtc_clock.timeIsCurrent() &&
+      sender_timestamp > ClockFloorRTC::MIN_VALID_EPOCH &&
+      sender_timestamp <= ClockFloorRTC::MAX_PLAUSIBLE_EPOCH &&
+      sender_timestamp > getRTCClock()->getCurrentTime()) {
     getRTCClock()->setCurrentTime(sender_timestamp);
   }
+#else
+  if (sender_timestamp > 1772323200UL && sender_timestamp < 2000000000UL &&
+      getRTCClock()->getCurrentTime() <= 1772323200UL) {
+    getRTCClock()->setCurrentTime(sender_timestamp);
+  }
+#endif
   int i = 0;
   out_frame[i++] = RESP_CODE_CONTACT_MSG_RECV_V3;
   out_frame[i++] = (int8_t)(pkt->getSNR() * 4);
@@ -3461,10 +3485,19 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
                                   const char *text) {
   // Clock bootstrap from a channel peer's send-time (same sane-window + unset-only guard
   // as queueMessage above) so a Wi-Fi/GPS-off node can still get time off public channels.
-  if (timestamp > 1700000000UL && timestamp < 2000000000UL &&
-      getRTCClock()->getCurrentTime() < 1700000000UL) {
+#if defined(ESP32)
+  if (!rtc_clock.timeIsCurrent() &&
+      timestamp > ClockFloorRTC::MIN_VALID_EPOCH &&
+      timestamp <= ClockFloorRTC::MAX_PLAUSIBLE_EPOCH &&
+      timestamp > getRTCClock()->getCurrentTime()) {
     getRTCClock()->setCurrentTime(timestamp);
   }
+#else
+  if (timestamp > 1772323200UL && timestamp < 2000000000UL &&
+      getRTCClock()->getCurrentTime() <= 1772323200UL) {
+    getRTCClock()->setCurrentTime(timestamp);
+  }
+#endif
   int i = 0;
   out_frame[i++] = RESP_CODE_CHANNEL_MSG_RECV_V3;
   out_frame[i++] = (int8_t)(pkt->getSNR() * 4);

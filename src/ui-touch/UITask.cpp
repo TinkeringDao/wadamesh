@@ -286,6 +286,7 @@ static_assert(ChannelSenderSplit::kMaxWireName >= (size_t)UITask::MAX_SENDER_NAM
       #include "../helpers/esp32/WebFileTransferProtocol.h"
     #endif
     #include "../helpers/ClockFloorRTC.h"
+    #include "../helpers/esp32/BootTimeSync.h"
     extern ClockFloorRTC rtc_clock;   // the board clock (variants/*/target.cpp); its send-timestamp floor is seeded/persisted from here (#89)
     #if defined(MULTI_TRANSPORT_COMPANION)
       #include "../helpers/esp32/MultiTransportCompanionInterface.h"   // bleLastFailReason()
@@ -14592,21 +14593,68 @@ static void saveExperimentalCb(lv_event_t* e) {
 // Set by src/main.cpp on the S3 boards (its Wi-Fi loop owns SNTP); null where nothing
 // restarts SNTP for us (the P4 IDF builds, the web host), which keep the plain copy.
 void (*g_sntp_resync_hook)() = nullptr;
+static uint32_t s_last_server_epoch = 0;
+static uint32_t s_last_server_epoch_ms = 0;
+static void clockSetFieldRefresh();
+static void tzDstStatusRefresh();
 
 static void syncClockCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED || !g_lv.task) return;
-  const bool ok = g_lv.task->setDeviceTimeFromSystemClock();
 #if defined(ESP32) && defined(MULTI_TRANSPORT_COMPANION)
-  // On most boards the "system" clock IS the device clock, so the copy above changes
-  // nothing unless SNTP had already moved it. With Wi-Fi up, ask the time server now
-  // instead; the Wi-Fi loop writes the answer through (RTC chip included) and says
-  // "Clock synced" when it lands.
+  // 1. Active Wi-Fi connection: ask the SNTP time server immediately.
   if (g_sntp_resync_hook && WiFi.status() == WL_CONNECTED) {
     g_sntp_resync_hook();
     g_lv.task->showAlert(TR("Asking the time server"), 1500);
     return;
   }
 #endif
+  // 2. Live GPS satellite time (if receiver has a valid fix & date).
+  const uint32_t gps_ts = g_lv.task->getGpsTime();
+#if defined(ESP32)
+  if (g_lv.task->getGpsFix() && gps_ts > ClockFloorRTC::MIN_VALID_EPOCH &&
+      gps_ts <= ClockFloorRTC::MAX_PLAUSIBLE_EPOCH)
+#else
+  if (g_lv.task->getGpsFix() && gps_ts > 1772323200UL)
+#endif
+  {
+    the_mesh.getRTCClock()->setCurrentTime(gps_ts);
+    clockSetFieldRefresh();
+    tzDstStatusRefresh();
+    g_lv.task->showAlert(TR("Clock synced"), 1200);
+    return;
+  }
+#if defined(ESP32) && defined(MULTI_TRANSPORT_COMPANION)
+  // 3. Saved Wi-Fi on-demand SNTP acquisition when Wi-Fi radio is currently off.
+  if (WiFi.status() != WL_CONNECTED && !wifiConfigWantsWifi()) {
+    g_lv.task->showAlert(TR("Asking the time server"), 1500);
+    uint32_t ntp_epoch = 0;
+    if (bootTimeSyncAcquire(ntp_epoch) == BootTimeSyncResult::Ok) {
+      the_mesh.getRTCClock()->setCurrentTime(ntp_epoch);
+      clockSetFieldRefresh();
+      tzDstStatusRefresh();
+      g_lv.task->showAlert(TR("Clock synced"), 1200);
+      return;
+    }
+  }
+  // 4. Recent authenticated repeater / room-server clock from login.
+  if (s_last_server_epoch > ClockFloorRTC::MIN_VALID_EPOCH &&
+      s_last_server_epoch <= ClockFloorRTC::MAX_PLAUSIBLE_EPOCH) {
+    const uint32_t elapsed_s = (uint32_t)(millis() - s_last_server_epoch_ms) / 1000u;
+    const uint32_t srv_now = s_last_server_epoch + elapsed_s;
+    if (srv_now > ClockFloorRTC::MIN_VALID_EPOCH && srv_now <= ClockFloorRTC::MAX_PLAUSIBLE_EPOCH) {
+      the_mesh.getRTCClock()->setCurrentTime(srv_now);
+      clockSetFieldRefresh();
+      tzDstStatusRefresh();
+      g_lv.task->showAlert(TR("Clock synced"), 1200);
+      return;
+    }
+  }
+#endif
+  const bool ok = g_lv.task->setDeviceTimeFromSystemClock();
+  if (ok) {
+    clockSetFieldRefresh();
+    tzDstStatusRefresh();
+  }
   g_lv.task->showAlert(ok ? TR("Clock synced") : TR("No system time yet"), 900);
 }
 
@@ -18082,8 +18130,38 @@ static void uiRotationPickCb(lv_event_t* e) {
 // Applied on top of the automatic (NTP / companion / mesh) time, purely at the
 // display layer via the POSIX TZ; the RTC and mesh timestamps stay UTC.
 static lv_obj_t* s_time_offset_lbl = nullptr;   // current offset readout (modal is a singleton)
+static lv_obj_t* s_tz_dst_lbl      = nullptr;   // live DST / UTC offset status on Clock page
 
 static void clockSetFieldRefresh();      // below: the "By hand" field follows the zone (#699)
+static void tzDstStatusRefresh() {
+  if (!s_tz_dst_lbl || !lv_obj_is_valid(s_tz_dst_lbl)) return;
+  const int zone_id = (int)touchPrefsGetTimezone();
+  const time_t now = (time_t)the_mesh.getRTCClock()->getCurrentTime();
+  struct tm l = {}, u = {};
+  localtime_r(&now, &l);
+  gmtime_r(&now, &u);
+  int diff_min = (l.tm_hour - u.tm_hour) * 60 + (l.tm_min - u.tm_min);
+  const int dd = l.tm_yday - u.tm_yday;
+  if (dd == 1 || dd < -1) diff_min += 24 * 60;
+  if (dd == -1 || dd > 1) diff_min -= 24 * 60;
+  const int sign = (diff_min < 0) ? -1 : 1;
+  const int abs_m = (diff_min < 0) ? -diff_min : diff_min;
+  const int off_h = abs_m / 60;
+  const int off_m = abs_m % 60;
+  char off_str[16];
+  if (diff_min == 0) snprintf(off_str, sizeof off_str, "UTC+0");
+  else if (off_m == 0) snprintf(off_str, sizeof off_str, "UTC%+d", sign * off_h);
+  else snprintf(off_str, sizeof off_str, "UTC%+d:%02d", sign * off_h, off_m);
+
+  char buf[128];
+  if (touchPrefsTimezoneHasAutoDst(zone_id)) {
+    snprintf(buf, sizeof buf, "Active: %s (%s) \xc2\xb7 Auto daylight saving (DST)",
+             off_str, l.tm_isdst > 0 ? "summer DST" : "standard time");
+  } else {
+    snprintf(buf, sizeof buf, "Active: %s \xc2\xb7 Fixed offset (no DST)", off_str);
+  }
+  lv_label_set_text(s_tz_dst_lbl, buf);
+}
 static void applyTimeOffsetNow() {
   char tz[48];
   touchPrefsBuildLocalTz(tz, sizeof tz);   // rebuilds from the saved offset
@@ -18093,6 +18171,7 @@ static void applyTimeOffsetNow() {
   // was, "Set clock" right after a zone change read those digits in the new zone and put
   // the clock off by the difference (#699).
   clockSetFieldRefresh();
+  tzDstStatusRefresh();
 }
 static void timeOffsetLabelRefresh() {
   if (!s_time_offset_lbl) return;
@@ -18599,6 +18678,8 @@ static void clockSetManualCb(lv_event_t* e) {
   }
 #endif
   the_mesh.getRTCClock()->setCurrentTime((uint32_t)t);
+  clockSetFieldRefresh();
+  tzDstStatusRefresh();
   if (g_lv.task) g_lv.task->showAlert(TR("Clock set"), 1400);
 }
 
@@ -19158,6 +19239,8 @@ static void buildClockPage() {
     lv_obj_t* c = setCard("Time zone");
     lv_obj_t* r = setActionRow(c, UI_ICON_GLOBE, "Time zone", touchPrefsTimezoneLabel(touchPrefsGetTimezone()), openTimezoneCb);
     s_tz_btn_lbl = (lv_obj_t*)lv_obj_get_user_data(r);
+    s_tz_dst_lbl = setNote(c, "", SET_TONE_INFO);
+    tzDstStatusRefresh();
     s_time_offset_lbl = setStepperRow(c, "Custom UTC offset", "Used only when the time zone is Custom (UTC offset).",
                                       "-1 h", "+1 h", timeOffsetMinusCb, timeOffsetPlusCb, nullptr, nullptr);
     timeOffsetLabelRefresh();
@@ -72762,11 +72845,32 @@ void UITask::onServerClock(const ContactInfo& contact, uint32_t server_epoch) {
   // Server clock vs ours (#89): servers replay-guard on the newest timestamp
   // they have seen from us, so a device clock BEHIND the server's stored mark
   // silently kills logins/posts/keep-alives. Every LOGIN_OK carries the server's
-  // clock in its first 4 bytes — compare and surface real skew. 5 min tolerance
-  // covers LoRa RTT + queueing; genuine trouble is minutes to hours.
+  // clock in its first 4 bytes.
+#if defined(ESP32)
+  if (server_epoch > ClockFloorRTC::MIN_VALID_EPOCH &&
+      server_epoch <= ClockFloorRTC::MAX_PLAUSIBLE_EPOCH) {
+    s_last_server_epoch    = server_epoch;
+    s_last_server_epoch_ms = millis();
+  }
+#endif
   const uint32_t ours = the_mesh.getRTCClock()->getCurrentTime();
   const int32_t  skew = (int32_t)(server_epoch - ours);
   const uint32_t mag  = (skew < 0) ? (uint32_t)(-skew) : (uint32_t)skew;
+#if defined(ESP32)
+  // If our clock is not yet synced from an external source (Seed, Floor, or
+  // unverified drift >= 60 s before any NTP/GPS/manual sync), adopt the
+  // authenticated server's clock directly into the system clock + hardware RTC.
+  if (server_epoch > ClockFloorRTC::MIN_VALID_EPOCH &&
+      server_epoch <= ClockFloorRTC::MAX_PLAUSIBLE_EPOCH &&
+      (!rtc_clock.timeIsCurrent() ||
+       (rtc_clock.source() != ClockFloorRTC::ClockSource::ExternalSync && mag >= 60))) {
+    the_mesh.getRTCClock()->setCurrentTime(server_epoch);
+    clockSetFieldRefresh();
+    tzDstStatusRefresh();
+    showAlert(TR("Clock synced"), 1500);
+    return;
+  }
+#endif
   if (mag < 300) return;
   static uint32_t s_skew_warn_ms = 0;                     // once a minute, tops
   const uint32_t nowms = millis();
@@ -79023,7 +79127,13 @@ uint32_t UITask::getGpsTime() {
   // The provider builds this from the NMEA date/time fields, which read as year 0 (epoch far in
   // the past) until the receiver has actually decoded them off the air. Anything plausibly recent
   // means real satellite time.
-  return (t > 1700000000L) ? (uint32_t)t : 0;
+#if defined(ESP32)
+  return (t > (long)ClockFloorRTC::MIN_VALID_EPOCH && t <= (long)ClockFloorRTC::MAX_PLAUSIBLE_EPOCH)
+             ? (uint32_t)t
+             : 0;
+#else
+  return (t > 1772323200L) ? (uint32_t)t : 0;
+#endif
 }
 
 int UITask::getGpsAltitude() {
@@ -79237,13 +79347,13 @@ bool UITask::setWifiRadio(bool on) {
 bool UITask::setDeviceTimeFromSystemClock() {
 #if defined(ESP32)
   const uint32_t t = (uint32_t)time(nullptr);
-  // ESP32RTCClock::begin() seeds the system clock to exactly MIN_VALID_EPOCH on power-on,
-  // so "still at the seed" means never synced. Pushing that into the mesh clock is a
-  // two-year step backwards that setCurrentTime()'s own MIN check cannot catch, because
-  // the value IS the constant it compares against — that is how a P4 (whose RTC chip left
-  // the system clock on the seed) could sync 2024 over a perfectly good clock. The old
-  // `t < 100000` guard only caught a clock counting up from zero, which never happens here.
-  if (t <= ClockFloorRTC::MIN_VALID_EPOCH) return false;
+  if (t <= ClockFloorRTC::MIN_VALID_EPOCH || t > ClockFloorRTC::MAX_PLAUSIBLE_EPOCH) return false;
+  // Never promote a stale persisted ClockSource::Floor (mirrored into the system clock by
+  // seedSystemClock() at boot) into ExternalSync + hardware RTC write unless the system
+  // clock actually moved ahead of the mesh clock (e.g. an external SNTP update) or the
+  // clock was already validated this boot.
+  const uint32_t dev_t = the_mesh.getRTCClock()->getCurrentTime();
+  if (!rtc_clock.timeIsCurrent() && t <= dev_t + 2) return false;
   the_mesh.getRTCClock()->setCurrentTime(t);
   return true;
 #else

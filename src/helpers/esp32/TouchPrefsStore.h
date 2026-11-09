@@ -830,6 +830,7 @@ bool touchPrefsSetTimeOffsetHours(int hours);
 int         touchPrefsTimezoneCount();           // number of picker rows
 int         touchPrefsTimezoneAt(int row);       // picker row -> zone id
 const char* touchPrefsTimezoneLabel(int id);     // display label of a zone id
+bool        touchPrefsTimezoneHasAutoDst(int id);// true when zone has automatic POSIX DST rules
 uint8_t     touchPrefsGetTimezone();             // selected zone id (default 0)
 void        touchPrefsSetTimezone(uint8_t id);
 

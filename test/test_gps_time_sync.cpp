@@ -85,6 +85,22 @@ static void scenario(bool ui_sync_on_wake) {
 int main() {
   scenario(false);   // the provider's own begin() fix
   scenario(true);     // plus the UI's syncTime() on wake (what the core provider relies on)
+  // A receiver whose backup RTC starts in 2023 before satellite date lock must not
+  // consume _time_sync_needed on the pre-2026 sentence and lock out the real 2026 sync.
+  {
+    g_test_ms = 100000;
+    g_utc_at_ms0 = 1698322800u - 100;   // 2023-10-26 (pre-MIN_VALID_EPOCH)
+    HardwareSerial uart;
+    RecordingClock clk;
+    WadaNmeaLocationProvider gps(uart, &clk, -1, -1);
+    uart.wake(500);
+    gps.begin();
+    run(gps, 8000);                     // > 3 valid sentences, but year is 2023
+    assert(clk.sets == 0);              // refused: _time_sync_needed stays armed
+    g_utc_at_ms0 = 1793017200u - (g_test_ms / 1000u);  // satellite date locks to 2026
+    run(gps, 3000);
+    assert(clk.sets == 1 && clk.stale_sets == 0);      // synced immediately without waiting 30 min
+  }
   printf("test_gps_time_sync: all passed\n");
   return 0;
 }

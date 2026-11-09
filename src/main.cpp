@@ -1495,6 +1495,12 @@ void setup() {
   // file-saved values (theme accent, brightness, language, …) take effect this
   // boot — otherwise a theme change "reverts" on every restart.
   touchPrefsReload();
+  {
+    char boot_tz[48];
+    touchPrefsBuildLocalTz(boot_tz, sizeof boot_tz);
+    setenv("TZ", boot_tz, 1);
+    tzset();
+  }
   // Keep the boot logo's NVS copy of the rotation in step with the real one.
   touchPrefsSyncBootUiRotation();
   // Restore replay protection before mesh startup or optional cold-boot NTP.
@@ -2293,7 +2299,7 @@ void loop() {
   {
     static uint32_t good_epoch = 0, good_millis = 0;
     const uint32_t live = rtc_clock.getCurrentTime();
-    if (live > 1700000000UL) {                 // clock sane -> remember it (anchor)
+    if (live > ClockFloorRTC::MIN_VALID_EPOCH) { // clock sane -> remember it (anchor)
       good_epoch  = live;
       good_millis = millis();
     } else if (good_epoch != 0) {              // clock went bad -> rebuild from anchor
