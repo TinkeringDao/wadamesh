@@ -25,6 +25,31 @@ New source files should carry an SPDX header:
 Files derived from MeshCore keep their original **MIT** header — don't relicense
 upstream code; only your own additions are GPL.
 
+## Legal, Clean-Room & RF Regulatory Compliance
+
+All contributors must read and comply with [**LEGAL.md**](LEGAL.md) and our
+[Code of Conduct](CODE_OF_CONDUCT.md):
+
+- **Clean-Room & Open-Source Provenance (`Directive 2009/24/EC (Articles 1(2), 5(3), 6, 8)` / `Article 3(1)(b) of Directive (EU) 2016/943` / `17 U.S.C. §§ 102(b), 107, 1201(f)` / `18 U.S.C. § 1839(6)(B) (DTSA)`):**
+  Only submit original code, publicly documented hardware register sequences
+  (from public datasheets or compatible open-source BSPs), or clean-room
+  interoperability implementations. Always document third-party attributions and
+  licenses in [`NOTICE`](NOTICE). Never submit proprietary vendor SDK code,
+  leaked NDA materials, or cryptographic/TPM bypasses.
+- **Trademark Nominative Fair Use (`Article 14(1)(c) of Regulation (EU) 2017/1001 (EUTMR)` / `15 U.S.C. §§ 1115(b)(4), 1125`):**
+  Reference third-party hardware and chip names (`LilyGo`, `T-Deck`, `Heltec V4`,
+  `Elecrow`, `ThinkNode M9`, `Semtech SX1262`, `ESP32-S3`, `nRF52840`) strictly
+  as descriptive indications of intended purpose and nominative fair use. Do not
+  add vendor logos or imply official manufacturer endorsement.
+- **RF & Battery Safety Boundaries (`Directive 2014/53/EU (RED)` / `ETSI EN 300 220-1/-2` / `FCC 47 C.F.R. Part 15.247 / Part 97`):**
+  Changes touching LoRa radio configuration (`SX1262` / `LR1110` / `LR1121` /
+  `LR2021`) or PMIC/battery charger drivers (`AXP2101` / `BQ25896` / `BQ27220`)
+  must respect regional frequency/power/duty-cycle limits and safe lithium-ion
+  charging defaults (`<= 4.20–4.288 V`, `0–45 °C` NTC temperature guard).
+- **Zero PII / Location Metadata:** Never commit personal names, private email
+  addresses, home addresses, postal codes, GPS coordinates, or baked Wi-Fi
+  credentials in source code, comments, test fixtures, or commit messages.
+
 ## How we work
 
 A few principles (borrowed from how this project is built):

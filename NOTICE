@@ -1,10 +1,14 @@
 wadamesh
 Copyright (c) 2026 Kaj Schittecat and the wadamesh contributors
+Copyright (c) 2025 Scott Powell / rippleradios.com (MeshCore)
+Copyright (c) 2026 TinkeringDao (modifications under the MIT License / GPL-3.0-or-later)
 
 This program is free software: you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
 Foundation, either version 3 of the License, or (at your option) any later
-version. See the LICENSE file for the full text.
+version. MeshCore-derived source files and TinkeringDao modifications to MIT
+components are additionally licensed under the MIT License so they remain
+upstreamable. See the LICENSE and LEGAL.md files for the full text.
 
 ================================================================================
 Third-party components and their licenses
@@ -62,7 +66,11 @@ minimp3 (bundled in lib/minimp3)
     PSRAM; default upstream behavior is unchanged when that hook is not used.
 
 AsyncElegantOTA (vendored in arch/esp32/AsyncElegantOTA)
-    Copyright (c) Ayush Sharma — MIT License
+    Copyright (c) 2019 Ayush Sharma — MIT License (see arch/esp32/AsyncElegantOTA/LICENSE)
+
+ESP Web Tools (vendored in deploy/site/vendor/esp-web-tools-10.4.0)
+    Copyright (c) Nabu Casa, Inc. and contributors — Apache License 2.0
+    (see deploy/site/vendor/esp-web-tools-10.4.0/LICENSE)
 
 TFT_eSPI (T-LoRa Pager display backend)
     Copyright (c) Bodmer — MIT / FreeBSD License — https://github.com/Bodmer/TFT_eSPI

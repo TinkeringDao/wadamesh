@@ -28,7 +28,7 @@ on:
         required: true
 
 permissions:
-  contents: write          # create the Release + upload assets (nothing more)
+  contents: read           # default workflow-wide least privilege
 
 concurrency:
   group: release-${{ github.ref }}
@@ -37,6 +37,8 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the Release + upload assets (nothing more)
     env:
       ENVS: "heltec_v4_tft_companion_radio_usb_tcp_touch LilyGo_TDeck_companion_radio_touch"
       # true only when the VPS deploy key secret is configured (no secret value is exposed)

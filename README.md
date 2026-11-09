@@ -11,6 +11,10 @@ Touch-UI [MeshCore](https://github.com/meshcore-dev/MeshCore) companion-radio
 firmware for the **LilyGo T-Deck / T-Deck Plus**, **Heltec V4 + TFT** and other boards
 (ESP32-S3).
 
+> [!IMPORTANT]
+> **Legal, Trademark (Nominative Fair Use), EU CRA/PLD Non-Commercial & RF Regulatory Compliance Notice (`Directive 2014/53/EU (RED)` / `FCC 47 C.F.R. Part 15.247 / Part 97`):**
+> `wadamesh` is an **independent, non-commercial open-source software project** (`Regulation (EU) 2024/2847 Art. 2(5)` & `Directive (EU) 2024/2853 Art. 2(2)`) and is **not affiliated with or endorsed by LilyGo, Heltec Automation, Elecrow, Seeed Studio, Semtech, Espressif, Nordic Semiconductor, STMicroelectronics, or Ripple Radios / MeshCore**. Hardware names (`T-Deck`, `T-Deck Pro`, `Heltec V4`, `ThinkNode M9`, `Tanmatsu`) are used strictly as compatibility designations and indications of intended purpose (`Article 14(1)(c) of Regulation (EU) 2017/1001 (EUTMR)` / `15 U.S.C. §§ 1115(b)(4), 1125`). **The hardware operator is solely responsible for ensuring that sub-GHz LoRa (`SX1262`) and 2.4 GHz Wi-Fi/BLE frequency band selection, transmit power (`dBm`), antenna gain (`dBi`), and duty cycle (`<= 1%` / `<= 10%` under `ETSI EN 300 220-1/-2` / `ERC/REC 70-03` / `Decision (EU) 2017/1483` or `FCC 47 C.F.R. Part 15.247 / Part 97`) comply with local laws.** Read the full notice in [**LEGAL.md**](LEGAL.md).
+
 An LVGL touch UI (map, chat, contacts, channels, settings) split out of
 [meshcomod](https://github.com/ALLFATHER-BV/meshcomod). The app depends on a
 MeshCore fork via PlatformIO `lib_deps`.
@@ -147,3 +151,9 @@ full list and their licenses. MeshCore-derived files keep their MIT notices; the
 combined work is distributed under the GPL (MIT is GPL-compatible). The MeshCore
 fork that wadamesh builds against stays **MIT** on purpose, so its Wi-Fi/BLE hooks
 remain upstreamable to MeshCore.
+
+For statutory interoperability, trademark nominative fair use (indication of
+intended purpose), EU CRA / EU PLD non-commercial open-source exemptions, RF
+spectrum compliance (`Directive 2014/53/EU (RED)` / `ETSI EN 300 220-1/-2` /
+`FCC 47 C.F.R. Part 15.247 / Part 97`), and lithium-ion battery safety
+disclaimers, see [**LEGAL.md**](LEGAL.md) and [**SECURITY.md**](SECURITY.md).
