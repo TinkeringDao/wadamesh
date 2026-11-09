@@ -50,6 +50,16 @@ All contributors must read and comply with [**LEGAL.md**](LEGAL.md) and our
   addresses, home addresses, postal codes, GPS coordinates, or baked Wi-Fi
   credentials in source code, comments, test fixtures, or commit messages.
 
+### Pre-Merge Verification & RF Safety Gate Checklist
+
+| Gate | Requirement | Verification Standard |
+|---|---|---|
+| **1. OPSEC & Zero-PII** | Zero personal identifiers, local paths, Wi-Fi credentials, or tokens in diff | Automated Gate 1 in `.github/workflows/autonomous-pr-review.yml` |
+| **2. Signed Commits & DCO** | All commits authored by `TinkeringDao <203040288+TinkeringDao@users.noreply.github.com>` with ED25519 SSH signature (`-S -s`) | Automated Gate 2 (`gpgsig` verification) |
+| **3. RF ERP & Duty Cycle** | `SX1262` / `LR1110` / `LR1121` / `LR2021` regional presets respect `<= 1%` (`g1`) / `<= 10%` (`g3`) duty cycle & ERP limits (`ETSI EN 300 220-1/-2`, `Directive 2014/53/EU`, `FCC Part 15.247`) | Variant & region preset audit (`REGIONS.md`, `LEGAL.md`) |
+| **4. PMIC & Battery Safety** | `AXP2101` / `BQ25896` charge termination `<= 4.20–4.288 V` and `0–45 °C` NTC thermal protection preserved | Driver & board variant review (`variants/`) |
+| **5. Clean-Room & Legal** | `GPL-3.0-or-later` / `MIT` headers intact; `LEGAL.md` retains `Addendum: German Statutory References` | Automated Gate 3 & Stage 4B Agentic Review |
+
 ## How we work
 
 A few principles (borrowed from how this project is built):
