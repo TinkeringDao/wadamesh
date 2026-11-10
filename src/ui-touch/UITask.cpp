@@ -11186,7 +11186,7 @@ static uint32_t taByteToCp(const char* txt, uint32_t byte_target);
 
 static int collectRecentMentionNames(char out[][32], int max_num) {
   if (!out || max_num <= 0) return 0;
-  RecentlyHeardName heard[k_mention_source_max];
+  static RecentlyHeardName heard[k_mention_source_max];
   const int heard_n = the_mesh.getRecentlyHeard(heard, k_mention_source_max);
   const uint8_t* self = the_mesh.getSelfPubKey();
   int count = 0;
@@ -15249,13 +15249,13 @@ static void openDiscoveredModalCb(lv_event_t* e) {
     }
   }
 
-  // Collect the not-yet-contact discovered slots, then sort by the selected mode.
+  // Collect all discovered slots (including auto-added / saved contacts), then sort by the selected mode.
   const double disc_self_lat = g_lv.task ? g_lv.task->getNodeLat() : 0.0;
   const double disc_self_lon = g_lv.task ? g_lv.task->getNodeLon() : 0.0;
   int order[DISCOVERED_MAX];
   int n = 0;
   for (int i = 0; i < DISCOVERED_MAX; ++i) {
-    if (!(s_discovered[i].used && !s_discovered[i].in_contacts)) continue;
+    if (!s_discovered[i].used) continue;
     // Distance sort needs a location — exclude entries with none from the results.
     if (g_disc_sort == DISC_SORT_DISTANCE &&
         s_discovered[i].ci.gps_lat == 0 && s_discovered[i].ci.gps_lon == 0) continue;
@@ -15339,6 +15339,8 @@ static void openDiscoveredModalCb(lv_event_t* e) {
   for (int k = 0; k < n; ++k) {
     int idx = order[k];
     LvDiscoveredEntry& e_disc = s_discovered[idx];
+    ContactInfo* existing = the_mesh.lookupContactByPubKey(e_disc.ci.id.pub_key, PUB_KEY_SIZE);
+    if (existing) e_disc.in_contacts = true;
 
     // Card background — full content width (was a fixed 222 px, leaving a gap).
     const lv_coord_t cw     = s_settings_content_w;
@@ -15384,7 +15386,10 @@ static void openDiscoveredModalCb(lv_event_t* e) {
     lv_obj_t* nm = lv_label_create(card);
     useChainedFont(nm);
     char nm_buf[40];
-    copyUtf8ReplacingMissingGlyphs(&g_font_14, nm_buf, sizeof(nm_buf), contactShownName(e_disc.ci.id.pub_key, e_disc.ci.name));
+    const char* raw_name = e_disc.ci.name[0] ? e_disc.ci.name
+                         : (existing && existing->name[0]) ? existing->name
+                         : e_disc.ci.name;
+    copyUtf8ReplacingMissingGlyphs(&g_font_14, nm_buf, sizeof(nm_buf), contactShownName(e_disc.ci.id.pub_key, raw_name));
     lv_label_set_text(nm, nm_buf[0] ? nm_buf : "(unnamed)");
     lv_obj_set_style_text_color(nm, lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
     lv_label_set_long_mode(nm, LV_LABEL_LONG_DOT);
@@ -15424,17 +15429,26 @@ static void openDiscoveredModalCb(lv_event_t* e) {
     lv_obj_set_width(meta, text_w);
     lv_obj_set_pos(meta, text_x, 3 + name_h + 2);
 
-    // "Add" button on the right, vertically centred
-    lv_obj_t* add_btn = lv_btn_create(card);
-    lv_obj_set_size(add_btn, add_w, card_h - 2 * pad - 2);
-    lv_obj_align(add_btn, LV_ALIGN_RIGHT_MID, 0, 0);
-    styleButton(add_btn);
-    s_disc_add_ctx[idx].slot_idx = idx;
-    lv_obj_add_event_cb(add_btn, discoveredAddCb, LV_EVENT_CLICKED, &s_disc_add_ctx[idx]);
-    lv_obj_t* add_lbl = lv_label_create(add_btn);
-    useChainedFont(add_lbl);
-    lv_label_set_text(add_lbl, TR("Add"));
-    lv_obj_center(add_lbl);
+    if (existing != nullptr || e_disc.in_contacts) {
+      lv_obj_t* saved_lbl = lv_label_create(card);
+      useChainedFont(saved_lbl);
+      lv_label_set_text(saved_lbl, TR("Saved"));
+      lv_obj_set_style_text_color(saved_lbl, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
+      lv_obj_set_style_text_font(saved_lbl, &g_font_12, LV_PART_MAIN);
+      lv_obj_align(saved_lbl, LV_ALIGN_RIGHT_MID, -4, 0);
+    } else {
+      // "Add" button on the right, vertically centred
+      lv_obj_t* add_btn = lv_btn_create(card);
+      lv_obj_set_size(add_btn, add_w, card_h - 2 * pad - 2);
+      lv_obj_align(add_btn, LV_ALIGN_RIGHT_MID, 0, 0);
+      styleButton(add_btn);
+      s_disc_add_ctx[idx].slot_idx = idx;
+      lv_obj_add_event_cb(add_btn, discoveredAddCb, LV_EVENT_CLICKED, &s_disc_add_ctx[idx]);
+      lv_obj_t* add_lbl = lv_label_create(add_btn);
+      useChainedFont(add_lbl);
+      lv_label_set_text(add_lbl, TR("Add"));
+      lv_obj_center(add_lbl);
+    }
 
     y += card_h + 6;
   }
@@ -16611,8 +16625,12 @@ static void buildRadioSettings() {
     g_set_modal.region_ta = setField(c, "Region scope (#tag, blank = none)", "#region", TOUCH_REGION_SCOPE_MAXLEN - 1);
     lv_obj_add_event_cb(g_set_modal.region_ta, saveRadioParamsCb, LV_EVENT_DEFOCUSED, nullptr);
     {
-      char rbuf[TOUCH_REGION_SCOPE_MAXLEN];
-      if (touchPrefsGetRegionScope(rbuf, sizeof(rbuf)) > 0 && rbuf[0]) lv_textarea_set_text(g_set_modal.region_ta, rbuf);
+      char rbuf[TOUCH_REGION_SCOPE_MAXLEN] = {0};
+      if (touchPrefsGetRegionScope(rbuf, sizeof(rbuf)) <= 0 || !rbuf[0]) {
+        const NodePrefs* np = the_mesh.getNodePrefs();
+        if (np && np->default_scope_name[0]) snprintf(rbuf, sizeof(rbuf), "%s", np->default_scope_name);
+      }
+      if (rbuf[0]) lv_textarea_set_text(g_set_modal.region_ta, rbuf);
     }
     setNote(c, "Channel-specific regions can be set in each channel's settings.");
     setActionRow(c, UI_ICON_HASH, "Known regions", nullptr, knownRegionsOpenCb);
@@ -18134,7 +18152,8 @@ static lv_obj_t* s_tz_dst_lbl      = nullptr;   // live DST / UTC offset status 
 
 static void clockSetFieldRefresh();      // below: the "By hand" field follows the zone (#699)
 static void tzDstStatusRefresh() {
-  if (!s_tz_dst_lbl || !lv_obj_is_valid(s_tz_dst_lbl)) return;
+  if (!s_tz_dst_lbl || !lv_obj_is_valid(s_tz_dst_lbl) ||
+      !lv_obj_check_type(s_tz_dst_lbl, &lv_label_class)) return;
   const int zone_id = (int)touchPrefsGetTimezone();
   const time_t now = (time_t)the_mesh.getRTCClock()->getCurrentTime();
   struct tm l = {}, u = {};
@@ -19239,7 +19258,10 @@ static void buildClockPage() {
     lv_obj_t* c = setCard("Time zone");
     lv_obj_t* r = setActionRow(c, UI_ICON_GLOBE, "Time zone", touchPrefsTimezoneLabel(touchPrefsGetTimezone()), openTimezoneCb);
     s_tz_btn_lbl = (lv_obj_t*)lv_obj_get_user_data(r);
-    s_tz_dst_lbl = setNote(c, "", SET_TONE_INFO);
+    lv_obj_t* dst_note = setNote(c, "", SET_TONE_INFO);
+    s_tz_dst_lbl = (dst_note && lv_obj_get_child_cnt(dst_note) >= 2)
+                       ? lv_obj_get_child(dst_note, 1)
+                       : dst_note;
     tzDstStatusRefresh();
     s_time_offset_lbl = setStepperRow(c, "Custom UTC offset", "Used only when the time zone is Custom (UTC offset).",
                                       "-1 h", "+1 h", timeOffsetMinusCb, timeOffsetPlusCb, nullptr, nullptr);
@@ -21876,7 +21898,7 @@ static void buildMqttSettings() {
   // The key (PSK) seals payloads with AES-GCM; empty sends plaintext.
   {
     lv_obj_t* c = setCard("Encryption");
-    g_set_modal.mqtt_psk_ta = setField(c, "Encryption key (optional)", "Empty = plaintext to a private broker", 32);
+    g_set_modal.mqtt_psk_ta = setField(c, "Encryption key (optional)", "Empty = plaintext to a private broker", 64);
     lv_textarea_set_password_mode(g_set_modal.mqtt_psk_ta, true);
     m9AttachSymbolButton(g_set_modal.mqtt_psk_ta);
   }
@@ -21885,7 +21907,7 @@ static void buildMqttSettings() {
   {
     SdNvsPrefs p;   // file-backed, matches MqttBridge (GH #128)
     bool cur_en = false, cur_dm = false, cur_ch = true, cur_consent = false;
-    char cur_host[64] = {}, cur_port_s[8] = "1883", cur_user[32] = {}, cur_pwd[32] = {}, cur_psk[33] = {};
+    char cur_host[64] = {}, cur_port_s[8] = "1883", cur_user[32] = {}, cur_pwd[32] = {}, cur_psk[65] = {};
     if (p.begin("mqtt", true)) {
       cur_en = p.getBool("en", false);
       cur_dm = p.getBool("dm", false);
@@ -23264,16 +23286,32 @@ static void actionSheetBlockCb(lv_event_t* e) {
 // which raises a 5 s alert showing both directions. Useful for diagnosing
 // link quality without exchanging a DM. Repeater-only (chat peers don't
 // forward).
+static bool     s_trace_ping_pending  = false;
+static bool     s_trace_route_pending = false;
+static uint32_t s_trace_sent_ms       = 0;
+
 static void actionSheetTracePingCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED || !g_lv.task) return;
   ContactInfo c;
   bool ok = the_mesh.getContactByIdx(s_action_sheet_mesh_idx, c);
   closeActionSheet();
   if (!ok) { g_lv.task->showAlert(TR("Contact gone"), 1200); return; }
-  uint32_t tag = the_mesh.uiSendTracePing(c.id.pub_key);
+  uint8_t adv_plen = 0;
+  uint8_t adv_path[MAX_PATH_SIZE];
+  const bool has_multi_hop =
+      (c.out_path_len != OUT_PATH_UNKNOWN && (c.out_path_len & 63) > 0) ||
+      (the_mesh.getAdvertPath(c.id.pub_key, PUB_KEY_SIZE, adv_plen, adv_path, sizeof(adv_path)) &&
+       (adv_plen & 63) > 0);
+  s_trace_route_pending = has_multi_hop;
+  s_trace_ping_pending  = !has_multi_hop;
+  uint32_t tag = the_mesh.uiSendTraceRoute(c);
   if (tag == 0) {
+    s_trace_ping_pending  = false;
+    s_trace_route_pending = false;
+    s_trace_sent_ms       = 0;
     g_lv.task->showAlert(TR("Trace failed"), 1200);
   } else {
+    s_trace_sent_ms = millis();
     markMeshRequest();   // status-bar async spinner
     g_lv.task->showAlert(TR("Trace sent\xe2\x80\xa6"), 1200);
   }
@@ -26583,12 +26621,17 @@ static void termDoSend(bool is_channel, const uint8_t* pub, int16_t chan_slot,
   } else {
     ContactInfo* by = the_mesh.lookupContactByPubKey((uint8_t*)pub, PUB_KEY_SIZE);
     if (!by) { termLogAppendC(TERM_C_ERR, nullptr, "contact missing"); return; }
-    ContactInfo rcpt = *by;
-    rcpt.out_path_len = OUT_PATH_UNKNOWN;   // force flood routing (matches Chats TX)
-    uint8_t attempt = s_term_attempt++;
-    if (attempt < 4) { attempt = 4; s_term_attempt = 5; }
     uint32_t expected_ack = 0, est_timeout = 0;
-    int rr = the_mesh.sendMessage(rcpt, ts, attempt, body, expected_ack, est_timeout);
+    int rr;
+    if (by->type == ADV_TYPE_REPEATER && MyMesh::isRepeaterPingCmd(body)) {
+      rr = the_mesh.uiSendRepeaterDmPing(*by, expected_ack, est_timeout);
+    } else {
+      ContactInfo rcpt = *by;
+      rcpt.out_path_len = OUT_PATH_UNKNOWN;   // force flood routing (matches Chats TX)
+      uint8_t attempt = s_term_attempt++;
+      if (attempt < 4) { attempt = 4; s_term_attempt = 5; }
+      rr = the_mesh.sendMessage(rcpt, ts, attempt, body, expected_ack, est_timeout);
+    }
     if (rr == MSG_SEND_FAILED) { termLogAppendC(TERM_C_ERR, nullptr, "send failed"); return; }
     the_mesh.uiRegisterExpectedAck(expected_ack, by->id.pub_key);
     snprintf(r, sizeof r, "TX -> %s: %s", disp, body);
@@ -30798,6 +30841,7 @@ static lv_obj_t*   s_discover_status  = nullptr;   // header: "Scanning… · N 
 static lv_obj_t*   s_discover_btn_lbl = nullptr;   // Scan/Stop button label
 static lv_timer_t* s_discover_timer   = nullptr;
 static bool        s_discover_scanning = true;
+static bool        s_discover_tx_throttled = false;
 static uint32_t    s_discover_last_scan_ms = 0;
 
 static void closeDiscoverPage();
@@ -31195,17 +31239,32 @@ static void discoverBuildFeed() {
     char disp[15], disp_esc[30];
     copyUtf8ReplacingMissingGlyphs(&g_font_12, disp, sizeof disp, name);
     recolorEscape(disp_esc, sizeof disp_esc, disp);
+    char rf_buf[40];
+    if (h.their_snr_q4 == 0 && h.path_len > 0) {
+      snprintf(rf_buf, sizeof rf_buf, "%uh \xC2\xB7 RX %+.1f dB \xC2\xB7 %d dBm",
+               (unsigned)pathHops(h.path_len), (double)h.our_snr_q4 / 4.0, (int)h.our_rssi);
+    } else {
+      snprintf(rf_buf, sizeof rf_buf, "%ddBm %.1f%s",
+               (int)h.our_rssi, (double)h.our_snr_q4 / 4.0, direct);
+    }
     q += snprintf(buf + q, sizeof(buf) - q,
-      "#%06X %s#  %s  %ddBm %.1f%s%s  \xC2\xB7 %s\n",
+      "#%06X %s#  %s  %s%s  \xC2\xB7 %s\n",
       (unsigned)discTypeColor(h.node_type), disp_esc, discTypeShort(h.node_type),
-      (int)h.our_rssi, (double)h.our_snr_q4 / 4.0, direct, dist_seg, ago);
+      rf_buf, dist_seg, ago);
   }
   if (q == 0) snprintf(buf, sizeof buf, TR("#7A7F87 Scanning\xE2\x80\xA6 nothing has answered yet#"));
   else if (buf[q - 1] == '\n') buf[q - 1] = '\0';
   normalizeLightSurfaceRecolor(buf);
   lv_label_set_text(s_discover_feed, buf);
-  if (s_discover_status)
-    lv_label_set_text_fmt(s_discover_status, TR("%s \xC2\xB7 %d nearby (%d rpt, %d comp)"), s_discover_scanning ? TR("Scanning\xE2\x80\xA6") : TR("Paused"), (int)m, rpt, comp);
+  if (s_discover_status) {
+    if (s_discover_scanning && s_discover_tx_throttled) {
+      lv_label_set_text_fmt(s_discover_status, TR("Listening (TX pause) \xC2\xB7 %d nearby (%d rpt, %d comp)"),
+                            (int)m, rpt, comp);
+    } else {
+      lv_label_set_text_fmt(s_discover_status, TR("%s \xC2\xB7 %d nearby (%d rpt, %d comp)"),
+                            s_discover_scanning ? TR("Scanning\xE2\x80\xA6") : TR("Paused"), (int)m, rpt, comp);
+    }
+  }
 }
 
 // Sweep interval, backing off. A probe is not one packet: it is our zero-hop
@@ -31234,9 +31293,12 @@ static void discoverTimerCb(lv_timer_t* t) {
   if (s_discover_scanning &&
       (s_discover_last_scan_ms == 0 || (now - s_discover_last_scan_ms) >= discoverSweepInterval())) {
     if (the_mesh.getRemainingTxBudget() >= 300) {   // airtime gate: keep a duty-cycle cushion
+      s_discover_tx_throttled = false;
       the_mesh.uiStartDiscoverScan(0);              // 0 = all node types
       s_discover_last_scan_ms = now;
       if (s_disc_sweep_n < 250) s_disc_sweep_n++;
+    } else {
+      s_discover_tx_throttled = true;
     }
   }
   discoverBuildFeed();
@@ -31246,6 +31308,7 @@ static void discoverTimerCb(lv_timer_t* t) {
 static void discoverScanToggleCb(lv_event_t* e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
   s_discover_scanning = !s_discover_scanning;
+  s_discover_tx_throttled = false;
   if (s_discover_scanning) {
     s_discover_last_scan_ms = 0;   // resume -> sweep immediately...
     s_disc_sweep_n = 0;            // ...and at the fast cadence again
@@ -31414,8 +31477,8 @@ static void openDiscoverPage() {
   normalizeLightSurfaceRecolor(footer);
   lv_label_set_text(s_disc_footer, footer);
 
-  the_mesh.discoverClear();
   s_discover_scanning = true;
+  s_discover_tx_throttled = false;
   s_disc_sweep_n = 0;   // a fresh look starts fast, then backs off
   s_discover_last_scan_ms = 0;                // fire the first sweep on the first tick
   discoverBuildFeed();
@@ -43903,6 +43966,12 @@ static void closeSettingsCategory() {
     s_ota_prev_btn = nullptr;
     g_lv.settings_status = nullptr; g_lv.diag_id_label = nullptr; g_lv.diag_label = nullptr;
   }
+  if (s_settings_open_cat == CAT_CLOCK) {
+    s_tz_btn_lbl = nullptr;
+    s_tz_dst_lbl = nullptr;
+    s_time_offset_lbl = nullptr;
+    s_clockset_ta = nullptr;
+  }
 #if defined(HAS_TDECK_GT911)
   if (s_settings_open_cat == CAT_LOCK) {   // null the sleep-diag live-label ptrs
     s_sleep_diag_lbl = nullptr; s_sleep_diag_lbl2 = nullptr;
@@ -44689,7 +44758,6 @@ static void closeMsgInfoPopup() {
 // tells onTracePingResult to render the multi-hop result in this dismissable
 // card (vs the compact "Trace SNR" toast used by the repeater action-sheet probe).
 static lv_obj_t* s_trace_result_root   = nullptr;
-static bool      s_trace_route_pending = false;
 
 static void closeTraceResultPopup() {
   if (s_trace_result_root) {
@@ -45109,11 +45177,14 @@ static void msgInfoTraceCb(lv_event_t* e) {
   }
   closeMsgInfoPopup();
   s_trace_route_pending = true;
+  s_trace_ping_pending  = false;
   uint32_t tag = the_mesh.uiSendTraceRoute(c);
   if (tag == 0) {
     s_trace_route_pending = false;
+    s_trace_sent_ms       = 0;
     g_lv.task->showAlert(TR("Trace failed"), 1400);
   } else {
+    s_trace_sent_ms = millis();
     g_lv.task->showAlert(TR("Tracing route\xe2\x80\xa6"), 1600);
   }
 }
@@ -45146,15 +45217,37 @@ static uint32_t nodeSigColorHex(const char* s) {
 // scope when it matched our key. nullptr when nothing names it: unscoped, matched
 // no key we hold, or ambiguous. `home` backs the own-scope case; the bubble path
 // calls this per bubble, which is why touchPrefsGetRegionScope serves it from RAM.
+static int effectiveRegionScope(int chan_slot, char* out, size_t out_cap) {
+  if (!out || out_cap == 0) return 0;
+  out[0] = '\0';
+#if defined(ESP32)
+  if (chan_slot >= 0 && touchPrefsGetChannelScope(chan_slot, out, (int)out_cap) > 0 && out[0]) {
+    return (int)strlen(out);
+  }
+  if (touchPrefsGetRegionScope(out, (int)out_cap) > 0 && out[0]) {
+    return (int)strlen(out);
+  }
+#endif
+  const NodePrefs* np = the_mesh.getNodePrefs();
+  if (np && np->default_scope_name[0]) {
+    snprintf(out, out_cap, "%s", np->default_scope_name);
+    return (int)strlen(out);
+  }
+  return 0;
+}
+
 static const char* msgScopeRegionName(const UITask::UIMessage& m, char* home, size_t home_cap) {
   if (!(m.meta_flags & UITask::MSG_META_HAS_SCOPE)) return nullptr;
   const uint8_t rslot = UITask::metaScopeSlot(m.meta_flags);
   if (rslot == REGION_SLOT_AMBIGUOUS) return nullptr;
   const char* rname = rslot ? the_mesh.regionRegistry().nameForSlot(rslot) : nullptr;
   if (rname) return rname;
-  if ((m.meta_flags & UITask::MSG_META_SCOPE_HOME) && home && home_cap) {
-    touchPrefsGetRegionScope(home, (int)home_cap);
-    if (home[0]) return home;
+  if (home && home_cap) {
+    const int cslot = (m.channel && g_lv.task) ? g_lv.task->activeChannelSlot() : -1;
+    effectiveRegionScope(cslot, home, home_cap);
+    if (home[0] && ((m.meta_flags & UITask::MSG_META_SCOPE_HOME) || rslot == REGION_SLOT_NONE)) {
+      return home;
+    }
   }
   return nullptr;
 }
@@ -45332,6 +45425,15 @@ static void openMessageInfoPopup(int msg_idx) {
                      "\nPath   \xe2\x80\x94"
                      "\nSNR    \xe2\x80\x94"
                      "\nRSSI   \xe2\x80\x94");
+  }
+  if (m.outgoing && m.channel) {
+    char home[TOUCH_REGION_SCOPE_MAXLEN] = {0};
+    const int cslot = g_lv.task ? g_lv.task->activeChannelSlot() : -1;
+    if (effectiveRegionScope(cslot, home, sizeof home) > 0 && home[0]) {
+      char region_esc[2 * sizeof home];
+      recolorEscape(region_esc, sizeof region_esc, home);
+      blen += snprintf(body + blen, sizeof(body) - blen, "\n%s  %s", TR("Scope"), region_esc);
+    }
   }
   // Delivery state (outgoing DMs only)
   if (m.outgoing && !m.channel) {
@@ -46193,8 +46295,12 @@ static void chatBuildFoot(const UITask::UIMessage& m, bool channel_mode, ChatFoo
   if (!m.outgoing) {
     // Region the message was scoped to, when it resolves to a name (#594), as the
     // iOS app shows it under each message.
-    char home[TOUCH_REGION_SCOPE_MAXLEN];
+    char home[TOUCH_REGION_SCOPE_MAXLEN] = {0};
     const char* rname = msgScopeRegionName(m, home, sizeof home);
+    if ((!rname || !rname[0]) && channel_mode) {
+      const int cslot = g_lv.task ? g_lv.task->activeChannelSlot() : -1;
+      if (effectiveRegionScope(cslot, home, sizeof home) > 0) rname = home;
+    }
     if (rname && rname[0] == '#') ++rname;   // "#de-mitte" reads as "de-mitte"
     size_t o = 0;
     if (rname && rname[0]) o = (size_t)snprintf(f.text, sizeof f.text, "%s \xC2\xB7 ", rname);
@@ -46214,14 +46320,24 @@ static void chatBuildFoot(const UITask::UIMessage& m, bool channel_mode, ChatFoo
     return;
   }
   if (channel_mode) {
+    char home[TOUCH_REGION_SCOPE_MAXLEN] = {0};
+    const int cslot = g_lv.task ? g_lv.task->activeChannelSlot() : -1;
+    effectiveRegionScope(cslot, home, sizeof home);
+    const char* rname = home;
+    if (rname[0] == '#') ++rname;
+    size_t ro = 0;
+    if (rname[0]) ro = (size_t)snprintf(f.text, sizeof f.text, "%s \xC2\xB7 ", rname);
+    if (ro >= sizeof f.text) ro = sizeof f.text - 1;
+    char* rt = f.text + ro;
+    const size_t rtn = sizeof f.text - ro;
     const uint8_t reps = m.sent_fp ? the_mesh.uiRepeatsForFp(m.sent_fp) : 0;
     if (reps > 0) {
       f.dots = (uint8_t)(reps > 5 ? 5 : reps);
       f.fg = COLOR_GLOW;
-      snprintf(f.text, sizeof f.text, reps == 1 ? TR("Heard by 1 repeater") : TR("Heard by %u repeaters"), (unsigned)reps);
+      snprintf(rt, rtn, reps == 1 ? TR("Heard by 1 repeater") : TR("Heard by %u repeaters"), (unsigned)reps);
       if (ts[0]) { const size_t o = strlen(f.text); snprintf(f.text + o, sizeof f.text - o, "%s%s", sep, ts); }
     } else {
-      snprintf(f.text, sizeof f.text, "%s%s%s", TR("Sent"), sep, ts);
+      snprintf(rt, rtn, "%s%s%s", TR("Sent"), sep, ts);
     }
     return;
   }
@@ -46349,14 +46465,31 @@ static void chatBuildCompactLine(const UITask::UIMessage& m, LvChatPanel* p, int
                                          ? COLOR_STATUS_DANGER_TEXT : 0xE08080; break;
     }
   }
-  char reps[12] = "";
+  char reps[48] = "";
+  char rgn_c[TOUCH_REGION_SCOPE_MAXLEN] = {0};
+  const char* rgn_p = nullptr;
+  if (p && p->channel_mode) {
+    if (!m.outgoing) {
+      rgn_p = msgScopeRegionName(m, rgn_c, sizeof(rgn_c));
+    }
+    if (!rgn_p || !rgn_p[0]) {
+      const int cslot = g_lv.task ? g_lv.task->activeChannelSlot() : -1;
+      if (effectiveRegionScope(cslot, rgn_c, sizeof(rgn_c)) > 0) rgn_p = rgn_c;
+    }
+    if (rgn_p && rgn_p[0] == '#') ++rgn_p;
+  }
   if (m.outgoing && m.sent_fp) {
     const uint8_t r = the_mesh.uiRepeatsForFp(m.sent_fp);
-    if (r > 0) snprintf(reps, sizeof(reps), LV_SYMBOL_REFRESH "%u", (unsigned)r);
+    if (r > 0 && rgn_p && rgn_p[0]) snprintf(reps, sizeof(reps), "%s " LV_SYMBOL_REFRESH "%u", rgn_p, (unsigned)r);
+    else if (r > 0) snprintf(reps, sizeof(reps), LV_SYMBOL_REFRESH "%u", (unsigned)r);
+    else if (rgn_p && rgn_p[0]) snprintf(reps, sizeof(reps), "%s", rgn_p);
   } else if (!m.outgoing && (m.meta_flags & UITask::MSG_META_HAS_RX)
                          && (m.meta_flags & UITask::MSG_META_IS_FLOOD)) {
     const uint8_t hops = (uint8_t)(m.path_len & 0x3F);
-    snprintf(reps, sizeof(reps), LV_SYMBOL_SHUFFLE "%u", (unsigned)hops);
+    if (rgn_p && rgn_p[0]) snprintf(reps, sizeof(reps), "%s " LV_SYMBOL_SHUFFLE "%u", rgn_p, (unsigned)hops);
+    else snprintf(reps, sizeof(reps), LV_SYMBOL_SHUFFLE "%u", (unsigned)hops);
+  } else if (rgn_p && rgn_p[0]) {
+    snprintf(reps, sizeof(reps), "%s", rgn_p);
   }
 
   const unsigned sc_hex = lv_color_to32(sender_col) & 0xFFFFFFu;
@@ -46366,7 +46499,7 @@ static void chatBuildCompactLine(const UITask::UIMessage& m, LvChatPanel* p, int
                     (unsigned)(COLOR_SUB & 0xFFFFFFu), ts_c);
   off += snprintf(line + off, line_cap - off, "#%06X %s:# %s", sc_hex, esc_name, esc_text);
   if (off > (int)line_cap - 1) off = (int)line_cap - 1;
-  if ((dglyph[0] || reps[0]) && off < (int)line_cap - 32)
+  if ((dglyph[0] || reps[0]) && off < (int)line_cap - 64)
     snprintf(line + off, line_cap - off, "  #%06X %s%s#", (unsigned)(dfg & 0xFFFFFFu), dglyph, reps);
 }
 
@@ -46394,14 +46527,31 @@ static void chatBuildCompactPlainLine(const UITask::UIMessage& m, LvChatPanel* p
       default: break;
     }
   }
-  char reps[12] = "";
+  char reps[48] = "";
+  char rgn_c[TOUCH_REGION_SCOPE_MAXLEN] = {0};
+  const char* rgn_p = nullptr;
+  if (p && p->channel_mode) {
+    if (!m.outgoing) {
+      rgn_p = msgScopeRegionName(m, rgn_c, sizeof(rgn_c));
+    }
+    if (!rgn_p || !rgn_p[0]) {
+      const int cslot = g_lv.task ? g_lv.task->activeChannelSlot() : -1;
+      if (effectiveRegionScope(cslot, rgn_c, sizeof(rgn_c)) > 0) rgn_p = rgn_c;
+    }
+    if (rgn_p && rgn_p[0] == '#') ++rgn_p;
+  }
   if (m.outgoing && m.sent_fp) {
     const uint8_t r = the_mesh.uiRepeatsForFp(m.sent_fp);
-    if (r > 0) snprintf(reps, sizeof(reps), LV_SYMBOL_REFRESH "%u", (unsigned)r);
+    if (r > 0 && rgn_p && rgn_p[0]) snprintf(reps, sizeof(reps), "%s " LV_SYMBOL_REFRESH "%u", rgn_p, (unsigned)r);
+    else if (r > 0) snprintf(reps, sizeof(reps), LV_SYMBOL_REFRESH "%u", (unsigned)r);
+    else if (rgn_p && rgn_p[0]) snprintf(reps, sizeof(reps), "%s", rgn_p);
   } else if (!m.outgoing && (m.meta_flags & UITask::MSG_META_HAS_RX)
                          && (m.meta_flags & UITask::MSG_META_IS_FLOOD)) {
     const uint8_t hops = (uint8_t)(m.path_len & 0x3F);
-    snprintf(reps, sizeof(reps), LV_SYMBOL_SHUFFLE "%u", (unsigned)hops);
+    if (rgn_p && rgn_p[0]) snprintf(reps, sizeof(reps), "%s " LV_SYMBOL_SHUFFLE "%u", rgn_p, (unsigned)hops);
+    else snprintf(reps, sizeof(reps), LV_SYMBOL_SHUFFLE "%u", (unsigned)hops);
+  } else if (rgn_p && rgn_p[0]) {
+    snprintf(reps, sizeof(reps), "%s", rgn_p);
   }
 
   int off = 0;
@@ -46409,7 +46559,7 @@ static void chatBuildCompactPlainLine(const UITask::UIMessage& m, LvChatPanel* p
     off += snprintf(line + off, line_cap - off, "%s ", ts_c);
   off += snprintf(line + off, line_cap - off, "%s: %s", name_san, d.san_text);
   if (off > (int)line_cap - 1) off = (int)line_cap - 1;
-  if ((dglyph[0] || reps[0]) && off < (int)line_cap - 32)
+  if ((dglyph[0] || reps[0]) && off < (int)line_cap - 64)
     snprintf(line + off, line_cap - off, "  %s%s", dglyph, reps);
 }
 
@@ -46439,7 +46589,7 @@ static lv_coord_t chatCompactEmojiLift(const char* line) {
 static lv_coord_t chatMeasureCompactRowHeight(const UITask::UIMessage& m, LvChatPanel* p,
                                               int logical_i, const ChatBubbleDisplay& d) {
   (void)logical_i;
-  char line[640];
+  static char line[640];
   chatBuildCompactPlainLine(m, p, d, line, sizeof(line));
   static constexpr lv_coord_t kPadH = 3;
   const lv_coord_t inner_w = (s_chat_virt.content_w > kPadH * 2)
@@ -47638,7 +47788,7 @@ static lv_coord_t chatVirtCreateCompactRow(LvChatPanel* p, int logical_i, int ri
   chatParseMessageDisplay(m, p->channel_mode, s_chat_virt.thread_is_room, d);
   const bool mentions_me = (p->channel_mode || s_chat_virt.thread_is_room) &&
                            !m.outgoing && textMentionsMe(d.show_text);
-  char line[640];
+  static char line[640];
 #if defined(HAS_TDECK_PRO)
   const bool epaper_channel = p->channel_mode;
   if (epaper_channel) chatBuildCompactPlainLine(m, p, d, line, sizeof(line));
@@ -48589,7 +48739,7 @@ static void refreshChatList(LvChatPanel& p) {
       lv_obj_set_size(pv, LV_MAX((lv_coord_t)30, (lv_coord_t)(row_w - px - prev_right)), lv_font_get_line_height(&g_font_12));
       lv_obj_align(pv, LV_ALIGN_BOTTOM_LEFT, px, -kPrevB);
 
-      // A direct chat names how the last message from them got here.
+      // A direct chat names how the last message from them got here; a channel shows its active region scope.
       if (!ch && have && !pout && (pmeta & UITask::MSG_META_HAS_RX)) {
         char hop[24];
         if ((pmeta & UITask::MSG_META_IS_FLOOD) && ppath != 0xFF) {
@@ -48610,6 +48760,23 @@ static void refreshChatList(LvChatPanel& p) {
           lv_obj_set_style_text_color(hl, lv_color_hex(COLOR_TERTIARY), LV_PART_MAIN);
           lv_obj_align(hl, LV_ALIGN_TOP_LEFT, text_x + nw + 8,
                        (lv_coord_t)(name_base - (lv_font_get_line_height(&g_font_12) - g_font_12.base_line)));
+        }
+      } else if (ch) {
+        char rgn[TOUCH_REGION_SCOPE_MAXLEN] = {0};
+        const int cslot = g_lv.task ? g_lv.task->threadMeshChannelSlot(idxs[i]) : -1;
+        if (effectiveRegionScope(cslot, rgn, sizeof rgn) > 0 && rgn[0]) {
+          lv_obj_update_layout(nm);
+          const lv_coord_t nw = lv_txt_get_width(san_name, strlen(san_name), &g_font_semi_14, 0, LV_TEXT_FLAG_NONE);
+          const lv_coord_t room = row_w - text_x - name_right;
+          const lv_coord_t rw = lv_txt_get_width(rgn, strlen(rgn), &g_font_12, 0, LV_TEXT_FLAG_NONE);
+          if (nw + 8 + rw < room) {
+            lv_obj_t* rl = lv_label_create(btn);
+            lv_label_set_text(rl, rgn);
+            lv_obj_set_style_text_font(rl, &g_font_12, LV_PART_MAIN);
+            lv_obj_set_style_text_color(rl, lv_color_hex(COLOR_GLOW), LV_PART_MAIN);
+            lv_obj_align(rl, LV_ALIGN_TOP_LEFT, text_x + nw + 8,
+                         (lv_coord_t)(name_base - (lv_font_get_line_height(&g_font_12) - g_font_12.base_line)));
+          }
         }
       }
     }
@@ -61724,8 +61891,13 @@ static void chatHeaderSubtitle(char* out, size_t cap) {
       for (int k = 0; k < ns; ++k) if (seen[k] == h) { dup = true; break; }
       if (!dup) seen[ns++] = h;
     }
-    if (ns == 1) snprintf(out, cap, "%s", TR("1 node heard today"));
-    else         snprintf(out, cap, TR("%d nodes heard today"), ns);
+    char rgn[TOUCH_REGION_SCOPE_MAXLEN] = {0};
+    effectiveRegionScope(g_lv.task->activeChannelSlot(), rgn, sizeof rgn);
+    char heard[64];
+    if (ns == 1) snprintf(heard, sizeof heard, "%s", TR("1 node heard today"));
+    else         snprintf(heard, sizeof heard, TR("%d nodes heard today"), ns);
+    if (rgn[0])  snprintf(out, cap, "%s \xC2\xB7 %s", rgn, heard);
+    else         snprintf(out, cap, "%s", heard);
   } else {
     // How the last message from them got here.
     for (int i = 0; i < n; ++i) {
@@ -70819,7 +70991,7 @@ static void openChannelScopeModal(int slot, const char* name) {
     char def[TOUCH_REGION_SCOPE_MAXLEN] = {0};
     touchPrefsGetChannelScope(slot, cur, sizeof cur);
     if (cur[0]) lv_textarea_set_text(s_chanscope_ta, cur);
-    touchPrefsGetRegionScope(def, sizeof def);
+    effectiveRegionScope(-1, def, sizeof def);
     taSetPlaceholder(s_chanscope_ta, def[0] ? def : TR("(no default)")); }
 #else
   taSetPlaceholder(s_chanscope_ta, TR("(no default)"));
@@ -71894,22 +72066,11 @@ void UITask::discoveredContact(const ContactInfo& contact, bool is_new, uint8_t 
 #if !defined(HAS_TANMATSU)
   s_web_rx_nudge = true;
 #endif
-  /* `is_new=false` → contact is already in contacts[]; nothing to do (the
-   * Discovered modal only shows pending nodes that haven't been added yet).
-   * On `is_new=true` we either update the existing slot for this pubkey or
-   * claim a free / least-recently-used slot. */
-  if (!is_new) {
-    // Refresh in_contacts flag if we happen to have a stale entry for it.
-    for (int i = 0; i < DISCOVERED_MAX; ++i) {
-      if (s_discovered[i].used &&
-          memcmp(s_discovered[i].ci.id.pub_key, contact.id.pub_key, PUB_KEY_SIZE) == 0) {
-        s_discovered[i].in_contacts = true;
-        break;
-      }
-    }
-    return;
-  }
-
+  /* Always upsert into s_discovered[] so the Discovered modal shows every
+   * over-the-air node heard during a drive (including repeaters/rooms that
+   * auto-add placed into contacts[], or known contacts that re-advertised).
+   * `in_contacts` tracks whether the contact is already saved so the unread
+   * badge (`discoveredCount()`) only counts un-saved nodes. */
 #if defined(ESP32)
   // Hop filter: auto-delete nodes heard via more hops than the configured limit
   // (0 = off). Drop the advert and remove any existing entry for this node.
@@ -71927,11 +72088,13 @@ void UITask::discoveredContact(const ContactInfo& contact, bool is_new, uint8_t 
 #endif
 
   int slot = -1;
+  char prev_name[32] = {0};
   // Match by pubkey first so repeated adverts update the same entry.
   for (int i = 0; i < DISCOVERED_MAX; ++i) {
     if (s_discovered[i].used &&
         memcmp(s_discovered[i].ci.id.pub_key, contact.id.pub_key, PUB_KEY_SIZE) == 0) {
       slot = i;
+      memcpy(prev_name, s_discovered[i].ci.name, sizeof(prev_name));
       break;
     }
   }
@@ -71957,11 +72120,14 @@ void UITask::discoveredContact(const ContactInfo& contact, bool is_new, uint8_t 
     }
   }
   s_discovered[slot].used = true;
-  s_discovered[slot].in_contacts = false;
+  s_discovered[slot].in_contacts = !is_new || (the_mesh.lookupContactByPubKey(contact.id.pub_key, PUB_KEY_SIZE) != nullptr);
   s_discovered[slot].path_len = path_len;
   s_discovered[slot].last_advert_ts = contact.last_advert_timestamp;
   s_discovered[slot].recv_ms = (uint32_t)millis();
   s_discovered[slot].ci = contact;
+  if (s_discovered[slot].ci.name[0] == '\0' && prev_name[0] != '\0') {
+    memcpy(s_discovered[slot].ci.name, prev_name, sizeof(s_discovered[slot].ci.name));
+  }
   ++s_discovered_seq;
   markDiscoveredDirty();   // persist across reboots (rate-capped write)
 }
@@ -72979,12 +73145,18 @@ void UITask::onAdminLoginResult(const ContactInfo& contact, bool success, uint8_
 }
 
 void UITask::onAdminCommandReply(const ContactInfo& contact, const char* text) {
-  // Only append if the reply is from the contact we're currently logged
-  // into. Replies from a different repeater would be confusing — the
-  // companion-serial side handles those separately via queueMessage.
   if (raOnCliReply(contact, text)) return;   // a "wX|" reply to the admin app
-  if (memcmp(contact.id.pub_key, s_admin_pub32, 32) != 0) return;
-  adminLogAppend("", text ? text : "");
+  if (s_admin_root && memcmp(contact.id.pub_key, s_admin_pub32, 32) == 0) {
+    adminLogAppend("", text ? text : "");
+    return;
+  }
+  // If the user sent a CLI command from the repeater's DM chat thread (with the
+  // Admin Console modal closed), display the repeater's CLI reply in that DM thread.
+  if (text && text[0] && contact.name[0]) {
+    notify(UIEventType::contactMessage);
+    const uint8_t plen = (contact.out_path_len >= 0) ? (uint8_t)contact.out_path_len : 0xFF;
+    newMsgFromPub(plen, contact.id.pub_key, contact.name, text, _msgcount + 1);
+  }
 }
 
 void UITask::markThreadsDirty(unsigned long delay_ms) {
@@ -75475,6 +75647,24 @@ bool UITask::loadHistoryFromStorage() {
     const uint32_t nt = newestThreadMessageTs(_ui_threads[i].name, _ui_threads[i].channel);
     if (nt >= 1577836800UL) { _ui_threads[i].last_ts = nt; markThreadsDirty(2000); }
   }
+  // Seed ClockFloorRTC from our own persisted outgoing messages so a hard power-slider
+  // cut before the lazy NVS clock_floor flush cannot step outgoing timestamps backward
+  // behind messages already recorded in /sd/meshcomod/msgs/seg_*.bin.
+  {
+    uint32_t max_out_ts = 0;
+    for (int i = 0; i < _ui_msg_count; ++i) {
+      const int slot = (_ui_msg_head - _ui_msg_count + i + _ui_msg_cap) % _ui_msg_cap;
+      const UIMessage& m = _ui_msgs[slot];
+      if (m.outgoing && m.ts > ClockFloorRTC::MIN_VALID_EPOCH &&
+          m.ts <= ClockFloorRTC::MAX_PLAUSIBLE_EPOCH && m.ts > max_out_ts) {
+        max_out_ts = m.ts;
+      }
+    }
+    if (max_out_ts > ClockFloorRTC::MIN_VALID_EPOCH) {
+      rtc_clock.seedFloor(max_out_ts);
+      rtc_clock.seedSystemClock();
+    }
+  }
   if (!from_segments) {
     // Backfill per-record sequence numbers for records loaded from the
     // pre-segment formats (their records carry no seq on disk): stamp them in
@@ -76773,6 +76963,11 @@ int UITask::appendMessage(const char* thread, const char* sender, const char* te
   }
   ++_msgcount;
   markMsgsDirty();
+#if defined(ESP32)
+  if (outgoing && rtc_clock.getFloor() > ClockFloorRTC::MIN_VALID_EPOCH) {
+    touchPrefsSetClockFloor(rtc_clock.getFloor());
+  }
+#endif
 #if !defined(HAS_TANMATSU)
   s_web_rx_nudge = true;   // any new/changed message -> nudge the Contacts/Chats web client to refetch
 #endif
@@ -76808,6 +77003,8 @@ void UITask::onMessageAcked(uint32_t ack_hash) {
 void UITask::onTracePingResult(uint32_t tag, int8_t their_snr, int8_t our_snr,
                                uint8_t extra_hops, const int8_t* extra_snrs) {
   (void)tag;
+  s_trace_ping_pending = false;
+  s_trace_sent_ms      = 0;
   // SNR values come from the wire as int8_t * 4. Convert to floating-point
   // dB just for display so a user reading "-3.25 dB" understands the scale
   // (negative SNR is below the noise floor — typical for chirp-spread LoRa).
@@ -77090,7 +77287,12 @@ bool UITask::sendComposerToActiveThread(const char* override_text) {
     attempt = 4;
     s_ui_tx_attempt = 5;
   }
-  int r = the_mesh.sendMessage(tx_recipient, ts, attempt, truncated, expected_ack, est_timeout);
+  int r;
+  if (recipient.type == ADV_TYPE_REPEATER && MyMesh::isRepeaterPingCmd(truncated)) {
+    r = the_mesh.uiSendRepeaterDmPing(*by_pub, expected_ack, est_timeout);
+  } else {
+    r = the_mesh.sendMessage(tx_recipient, ts, attempt, truncated, expected_ack, est_timeout);
+  }
   {
     uint32_t hash4 = 0;
     bool has_hash = the_mesh.getLastTxtTxHash4(hash4);
@@ -82618,7 +82820,7 @@ void UITask::loop() {
     if (!s_floor_due) {
       s_floor_due = now + 60000UL;
     } else if (now >= s_floor_due) {
-      s_floor_due = now + 15UL * 60UL * 1000UL;
+      s_floor_due = now + 2UL * 60UL * 1000UL;
       touchPrefsSetClockFloor(rtc_clock.getFloor());   // no-op unless it grew
     } }
 #endif
@@ -82743,6 +82945,16 @@ void UITask::loop() {
     char msg[64];
     snprintf(msg, sizeof(msg), TR("No reply from %s"), s_ui_ping_target_name);
     showAlert(msg, 3500);
+  }
+  if ((s_trace_ping_pending || s_trace_route_pending) && s_trace_sent_ms != 0) {
+    const uint32_t trace_timeout_ms = s_trace_route_pending ? 20000u : 8000u;
+    if ((uint32_t)(millis() - s_trace_sent_ms) > trace_timeout_ms) {
+      // Keep s_trace_route_pending latched until onTracePingResult or the next
+      // trace so a slow multi-hop LoRa reply still opens the per-hop popup.
+      s_trace_ping_pending = false;
+      s_trace_sent_ms      = 0;
+      showAlert(TR("No trace reply (node out of direct/known path)"), 2500);
+    }
   }
 #if defined(HELTEC_V4_EXPANSION_IO_PIN) && !defined(HELTEC_LORA_V4_R8)
   // Original V4 Expansion Kit SW3 "IO" (GPIO35, active-low). Debounce before

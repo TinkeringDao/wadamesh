@@ -1938,9 +1938,11 @@ int MyMesh::sendMessage(const ContactInfo& recipient, uint32_t timestamp, uint8_
 
   _last_plain_tx_meta_valid = false;
   uint32_t packet_hash4 = 0;
+  TxtTxDebugInfo local_dbg{};
+  TxtTxDebugInfo* dbg_ptr = out_dbg ? out_dbg : &local_dbg;
   int result = BaseChatMesh::sendMessage(recipient, timestamp, attempt, text,
                                          expected_ack, est_timeout,
-                                         &packet_hash4, out_dbg);
+                                         &packet_hash4, dbg_ptr);
 
   uint8_t retry_key[MAX_HASH_SIZE] = {};
   mesh::Packet* newest = result == MSG_SEND_FAILED
@@ -1975,6 +1977,10 @@ int MyMesh::sendMessage(const ContactInfo& recipient, uint32_t timestamp, uint8_
                         recipient.id.pub_key, PUB_KEY_SIZE,
                         reinterpret_cast<const uint8_t*>(text), strlen(text));
     _last_plain_tx_meta_valid = true;
+#if defined(ESP32) && defined(MULTI_TRANSPORT_COMPANION)
+    mqtt_bridge.publishDM(_prefs.node_name, self_id.pub_key, 0.0f, 0xFF, dbg_ptr->uniq_ts, text,
+                          "tx", recipient.name, recipient.id.pub_key);
+#endif
   }
   return result;
 }
@@ -2974,17 +2980,33 @@ void MyMesh::onContactsFull() {
   }
 }
 
+#if defined(ESP32)
+static uint32_t peerClockQuorumIdFromPubKey(const uint8_t pk[PUB_KEY_SIZE]) {
+  uint32_t id = 0;
+  if (pk) memcpy(&id, pk, sizeof(id));
+  return id == 0 ? 1u : id;
+}
+
+static uint32_t peerClockQuorumIdFromChannelText(const char* text) {
+  if (!text) return 0;
+  const char* colon = strchr(text, ':');
+  if (!colon || colon == text || (colon - text) > 48) return 0;
+  uint32_t h = 2166136261u;
+  for (const char* p = text; p < colon; ++p) {
+    h ^= (uint8_t)(*p);
+    h *= 16777619u;
+  }
+  return h == 0 ? 1u : h;
+}
+#endif
+
 void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) {
   // Bootstrap an unsynced clock (Seed or Floor after power loss) from an Ed25519-verified
-  // advertisement timestamp so standalone nodes acquire wall time from the first heard
-  // repeater or peer without waiting for a chat message.
+  // advertisement timestamp via adoptMeshPeerTime (2-peer quorum for large jumps, keeps
+  // _source == Floor so a stale peer heard first cannot lock out real-time peers).
 #if defined(ESP32)
-  if (!rtc_clock.timeIsCurrent() &&
-      contact.last_advert_timestamp > ClockFloorRTC::MIN_VALID_EPOCH &&
-      contact.last_advert_timestamp <= ClockFloorRTC::MAX_PLAUSIBLE_EPOCH &&
-      contact.last_advert_timestamp > getRTCClock()->getCurrentTime()) {
-    getRTCClock()->setCurrentTime(contact.last_advert_timestamp);
-  }
+  rtc_clock.adoptMeshPeerTime(contact.last_advert_timestamp,
+                              peerClockQuorumIdFromPubKey(contact.id.pub_key));
 #else
   if (contact.last_advert_timestamp > 1772323200UL && contact.last_advert_timestamp < 2000000000UL &&
       getRTCClock()->getCurrentTime() <= 1772323200UL) {
@@ -3000,6 +3022,7 @@ void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path
       _serial->writeFrameToAll(out_frame, 1 + PUB_KEY_SIZE);
     }
   }
+  discoverUpsert(contact.type, 0, getLastRxSnrQ4(), getLastRxRssi(), contact.id.pub_key, PUB_KEY_SIZE, path_len);
   // Add the accepted named advert to the session-local recent-heard cache.
   // A monotonic sequence, not the remote advert timestamp or local RTC, defines
   // order so an unset/adjusted clock cannot make a fresh node look stale.
@@ -3239,16 +3262,10 @@ ContactInfo*  MyMesh::processAck(const uint8_t *data) {
 void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packet *pkt,
                           uint32_t sender_timestamp, const uint8_t *extra, int extra_len, const char *text) {
   // Clock bootstrap from a peer's send-time when we have no real clock of our own (Wi-Fi
-  // and GPS off, or not yet synced). MeshCore 1.18 seeds the unset ESP32 clock at
-  // ClockFloorRTC::MIN_VALID_EPOCH (1772323200), so check !rtc_clock.timeIsCurrent()
-  // rather than the legacy < 1700000000 threshold.
+  // and GPS off, or not yet synced). Uses adoptMeshPeerTime so a stale peer does not
+  // promote _source to ExternalSync and lock out real-time peers.
 #if defined(ESP32)
-  if (!rtc_clock.timeIsCurrent() &&
-      sender_timestamp > ClockFloorRTC::MIN_VALID_EPOCH &&
-      sender_timestamp <= ClockFloorRTC::MAX_PLAUSIBLE_EPOCH &&
-      sender_timestamp > getRTCClock()->getCurrentTime()) {
-    getRTCClock()->setCurrentTime(sender_timestamp);
-  }
+  rtc_clock.adoptMeshPeerTime(sender_timestamp, peerClockQuorumIdFromPubKey(from.id.pub_key));
 #else
   if (sender_timestamp > 1772323200UL && sender_timestamp < 2000000000UL &&
       getRTCClock()->getCurrentTime() <= 1772323200UL) {
@@ -3348,9 +3365,14 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
 #endif
 }
 
-bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
-  // REVISIT: try to determine which Region (from transport_codes[1]) that Sender is indicating for replies/responses
-  //    if unknown, fallback to finding Region from transport_codes[0], the 'scope' used by Sender
+bool MyMesh::filterRecvFloodPacket(mesh::Packet* pkt) {
+  if (pkt && pkt->getRouteType() == ROUTE_TYPE_TRANSPORT_FLOOD && pkt->transport_codes[0] != 0) {
+    uint8_t slot = _region_reg.matchPacket(pkt, pkt->transport_codes[0]);
+    if (slot > 0 && slot <= REGION_SLOT_MAX) {
+      _last_heard_scope_slot = slot;
+      _last_heard_scope_ms = millis();
+    }
+  }
   return false;
 }
 
@@ -3419,6 +3441,18 @@ void MyMesh::sendFloodScoped(const mesh::GroupChannel& channel, mesh::Packet* pk
   }
 }
 
+void MyMesh::onMqttDirectMessageRecv(const uint8_t* sender_prefix6, const char* text) {
+  if (!sender_prefix6 || !text || !text[0]) return;
+  if (memcmp(sender_prefix6, self_id.pub_key, 6) == 0) return;
+  ContactInfo* from = lookupContactByPubKey(sender_prefix6, 6);
+  if (!from) return;
+  markConnectionActive(*from);
+  mesh::Packet pkt{};
+  pkt.header = PAYLOAD_TYPE_TXT_MSG;
+  const uint32_t ts = getRTCClock()->getCurrentTimeUnique();
+  queueMessage(*from, TXT_TYPE_PLAIN, &pkt, ts, NULL, 0, text);
+}
+
 void MyMesh::onMessageRecv(const ContactInfo &from, mesh::Packet *pkt, uint32_t sender_timestamp,
                            const char *text) {
   markConnectionActive(from); // in case this is from a server, and we have a connection
@@ -3483,15 +3517,9 @@ int MyMesh::searchChannelsByHash(const uint8_t* hash, mesh::GroupChannel dest[],
 
 void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packet *pkt, uint32_t timestamp,
                                   const char *text) {
-  // Clock bootstrap from a channel peer's send-time (same sane-window + unset-only guard
-  // as queueMessage above) so a Wi-Fi/GPS-off node can still get time off public channels.
+  // Clock bootstrap from a channel peer's send-time via adoptMeshPeerTime.
 #if defined(ESP32)
-  if (!rtc_clock.timeIsCurrent() &&
-      timestamp > ClockFloorRTC::MIN_VALID_EPOCH &&
-      timestamp <= ClockFloorRTC::MAX_PLAUSIBLE_EPOCH &&
-      timestamp > getRTCClock()->getCurrentTime()) {
-    getRTCClock()->setCurrentTime(timestamp);
-  }
+  rtc_clock.adoptMeshPeerTime(timestamp, peerClockQuorumIdFromChannelText(text));
 #else
   if (timestamp > 1772323200UL && timestamp < 2000000000UL &&
       getRTCClock()->getCurrentTime() <= 1772323200UL) {
@@ -3681,6 +3709,53 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
   return 0; // unknown
 }
 
+static void formatRepeaterPongMessage(const uint8_t* payload, size_t payload_len,
+                                      int8_t out_path_len, char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  unsigned batt_mv = 0, uptime_s = 0, queue_len = 0;
+  int16_t  noise_floor = 0, last_rssi = 0, last_snr_q4 = 0;
+  bool     has_snr = false;
+  bool     parsed = false;
+
+  if (payload && payload_len >= 24) {
+    batt_mv     = (unsigned)(payload[0] | (payload[1] << 8));
+    queue_len   = (unsigned)(payload[2] | (payload[3] << 8));
+    noise_floor = (int16_t)(payload[4] | (payload[5] << 8));
+    last_rssi   = (int16_t)(payload[6] | (payload[7] << 8));
+    uptime_s    = (unsigned)(payload[20] | (payload[21] << 8) |
+                             (payload[22] << 16) | (payload[23] << 24));
+    if (payload_len >= 44) {
+      last_snr_q4 = (int16_t)(payload[42] | (payload[43] << 8));
+      has_snr = true;
+    }
+    if (batt_mv >= 2000 && batt_mv <= 5500) parsed = true;
+  }
+  const int hops = (out_path_len >= 0) ? (int)(out_path_len & 0x3F) : -1;
+  char hop_str[16] = "";
+  if (hops >= 0) {
+    snprintf(hop_str, sizeof(hop_str), " | %dh", hops);
+  }
+  if (parsed) {
+    char up_str[24];
+    if (uptime_s >= 3600) {
+      snprintf(up_str, sizeof(up_str), "%uh%02um", uptime_s / 3600, (uptime_s % 3600) / 60);
+    } else {
+      snprintf(up_str, sizeof(up_str), "%um%02us", uptime_s / 60, uptime_s % 60);
+    }
+    if (has_snr) {
+      snprintf(out, cap, "PONG | RX %+.1fdB %ddBm (NF %d) | %u.%02uV | up %s%s",
+               ((float)last_snr_q4) / 4.0f, (int)last_rssi, (int)noise_floor,
+               batt_mv / 1000, (batt_mv % 1000) / 10, up_str, hop_str);
+    } else {
+      snprintf(out, cap, "PONG | RX %ddBm (NF %d) | %u.%02uV | up %s | q=%u%s",
+               (int)last_rssi, (int)noise_floor,
+               batt_mv / 1000, (batt_mv % 1000) / 10, up_str, queue_len, hop_str);
+    }
+  } else {
+    snprintf(out, cap, "PONG | status reply (%u bytes)%s", (unsigned)payload_len, hop_str);
+  }
+}
+
 void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, uint8_t len) {
   if (!data || len < 4) return;
   uint32_t tag;
@@ -3712,6 +3787,28 @@ void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, 
     } else if (kind == UiReqKind::Binary) {
       _ui->onBinaryReply(contact, &data[4], (size_t)(len - 4));
     } else {
+      // If this status ping was triggered by sending "ping" in a repeater's DM thread,
+      // confirm the outgoing "ping" bubble and post the formatted PONG reply in the DM thread.
+      if (_ui_dm_ping_active && memcmp(_ui_dm_ping_pub, contact.id.pub_key, PUB_KEY_SIZE) == 0) {
+        _ui_dm_ping_active = false;
+        const uint32_t ack4 = _ui_dm_ping_ack ? _ui_dm_ping_ack : tag;
+        uint32_t trip_time = millis() - _ui_dm_ping_sent_ms;
+        out_frame[0] = PUSH_CODE_SEND_CONFIRMED;
+        memcpy(&out_frame[1], &ack4, 4);
+        memcpy(&out_frame[5], &trip_time, 4);
+        _serial->writeFrameToAll(out_frame, 9);
+        _ui->onMessageAcked(ack4);
+
+        char pong_text[140];
+        formatRepeaterPongMessage(&data[4], (size_t)(len - 4), contact.out_path_len,
+                                  pong_text, sizeof(pong_text));
+        mesh::Packet rx_pkt{};
+        rx_pkt.header   = (uint8_t)((PAYLOAD_TYPE_TXT_MSG << PH_TYPE_SHIFT) | ROUTE_TYPE_FLOOD);
+        rx_pkt.path_len = (contact.out_path_len >= 0) ? (uint8_t)contact.out_path_len : 0;
+        rx_pkt._snr     = (int8_t)(_radio->getLastSNR() * 4.0f);
+        queueMessage(contact, TXT_TYPE_PLAIN, &rx_pkt, getRTCClock()->getCurrentTimeUnique(),
+                     nullptr, 0, pong_text);
+      }
       // STATUS or unknown — let the UI fall through its RepeaterStats /
       // JSON parser path.
       _ui->onPingReply(contact, &data[4], (size_t)(len - 4));
@@ -3924,21 +4021,18 @@ void MyMesh::onControlDataRecv(mesh::Packet *packet) {
       _ui_sig_ms     = millis();
     }
   }
-  // Discover scan (Discover app): collect EVERY NODE_DISCOVER_RESP matching the active discover
-  // sweep tag into _discover[], keyed by responder pubkey. Additive to the single-scalar probe
-  // capture above (they use different tags). RESP payload (MeshCore docs/payloads.md):
+  // Discover scan (Discover app): collect EVERY valid NODE_DISCOVER_RESP into _discover[],
+  // keyed by responder pubkey (even if rtag != _discover_tag, e.g. replies to _ui_sig_probe_tag,
+  // late jittered replies from an earlier sweep tag, or wardrive.lua sweeps).
+  // RESP payload (MeshCore docs/payloads.md):
   //   [0]=0x9<<4|node_type  [1]=their SNR*4 (reverse link)  [2..5]=tag  [6..]=pubkey (8 or 32 bytes).
-  if (packet->payload_len >= 6 + 8 && (packet->payload[0] & 0xF0) == CTL_TYPE_NODE_DISCOVER_RESP
-      && _discover_tag != 0) {
-    uint32_t rtag; memcpy(&rtag, &packet->payload[2], 4);
-    if (rtag == _discover_tag) {
-      uint8_t node_type    = packet->payload[0] & 0x0F;
-      int8_t  their_snr_q4 = (int8_t)packet->payload[1];
-      uint8_t pklen        = (packet->payload_len >= 6 + 32) ? 32 : 8;
-      int8_t  our_snr_q4   = (int8_t)(packet->getSNR() * 4.0f);
-      int8_t  our_rssi     = (int8_t)_radio->getLastRSSI();
-      discoverUpsert(&packet->payload[6], pklen, node_type, our_snr_q4, our_rssi, their_snr_q4, packet->path_len);
-    }
+  if (packet->payload_len >= 6 + 8 && (packet->payload[0] & 0xF0) == CTL_TYPE_NODE_DISCOVER_RESP) {
+    uint8_t node_type    = packet->payload[0] & 0x0F;
+    int8_t  their_snr_q4 = (int8_t)packet->payload[1];
+    uint8_t pklen        = (packet->payload_len >= 6 + 32) ? 32 : 8;
+    int8_t  our_snr_q4   = (int8_t)(packet->getSNR() * 4.0f);
+    int8_t  our_rssi     = (int8_t)_radio->getLastRSSI();
+    discoverUpsert(&packet->payload[6], pklen, node_type, our_snr_q4, our_rssi, their_snr_q4, packet->path_len);
   }
   if (packet->payload_len + 4 > sizeof(out_frame)) {
     MESH_DEBUG_PRINTLN("onControlDataRecv(), payload_len too long: %d", packet->payload_len);
@@ -3959,16 +4053,18 @@ void MyMesh::onControlDataRecv(mesh::Packet *packet) {
   }
 }
 
-// Upsert a discover responder into _discover[] (keyed by the 8-byte pubkey prefix). New nodes
-// append; a full table evicts the least-recently-heard. Both link directions + hop count are
+// Upsert a discover responder or passive advert into _discover[] (keyed by the 8-byte pubkey prefix).
+// New nodes append; a full table evicts the least-recently-heard. Both link directions + hop count are
 // refreshed on every reply. See DiscoverHit / uiStartDiscoverScan in MyMesh.h.
 void MyMesh::discoverUpsert(const uint8_t* pk, uint8_t pklen, uint8_t node_type,
                             int8_t our_snr_q4, int8_t our_rssi, int8_t their_snr_q4, uint8_t path_len) {
+  if (!pk || pklen < 8) return;
   uint32_t now = millis();
   int slot = -1;
   for (uint8_t i = 0; i < _discover_cnt; i++) {
     if (memcmp(_discover[i].pubkey, pk, 8) == 0) { slot = i; break; }
   }
+  const bool existed = (slot >= 0);
   if (slot < 0) {
     if (_discover_cnt < DISCOVER_MAX) {
       slot = _discover_cnt++;
@@ -3980,14 +4076,20 @@ void MyMesh::discoverUpsert(const uint8_t* pk, uint8_t pklen, uint8_t node_type,
     memset(&_discover[slot], 0, sizeof(DiscoverHit));
     memcpy(_discover[slot].pubkey, pk, pklen > 32 ? 32 : pklen);
     _discover[slot].first_ms = now;
+  } else if (pklen >= 32) {
+    memcpy(_discover[slot].pubkey, pk, 32);
   }
   DiscoverHit& h = _discover[slot];
-  h.node_type    = node_type;
-  h.our_snr_q4   = our_snr_q4;
-  h.our_rssi     = our_rssi;
-  h.their_snr_q4 = their_snr_q4;
-  h.path_len     = path_len;
-  h.last_ms      = now;
+  const bool keep_their_snr = existed && h.their_snr_q4 != 0 && (h.path_len & 0x3F) == 0 &&
+                              their_snr_q4 == 0 && (uint32_t)(now - h.last_ms) < 60000UL;
+  if (!keep_their_snr) {
+    h.their_snr_q4 = their_snr_q4;
+  }
+  h.node_type  = node_type;
+  h.our_snr_q4 = our_snr_q4;
+  h.our_rssi   = our_rssi;
+  h.path_len   = path_len;
+  h.last_ms    = now;
   if (h.heard < 0xFFFF) h.heard++;
 }
 
@@ -4142,6 +4244,21 @@ void MyMesh::applyRadioFromPrefs() {
 #endif
 }
 
+static void ensureRegionWithParents(RegionRegistry& reg, const char* scope_name) {
+  if (!scope_name || !scope_name[0]) return;
+  reg.ensureRegion(scope_name);
+  // Register up to 2 dash-delimited parent prefixes (e.g. "#cc-st-loc" -> "#cc-st", "#cc")
+  // so multi-level regional repeaters resolve without hardcoding any geographic list.
+  char buf[40] = {0};
+  strncpy(buf, scope_name, sizeof(buf) - 1);
+  for (int depth = 0; depth < 2; ++depth) {
+    char* dash = strrchr(buf, '-');
+    if (!dash || dash <= buf + 1) break;
+    *dash = '\0';
+    reg.ensureRegion(buf);
+  }
+}
+
 void MyMesh::setDefaultFloodScope(const char* region_name) {
   // Trim leading/trailing whitespace — a stray space changes the hash and would
   // derive the wrong scope key (the node would never match the region).
@@ -4158,12 +4275,16 @@ void MyMesh::setDefaultFloodScope(const char* region_name) {
     tag[o] = '\0';
   }
   if (tag[0] == '\0' || (tag[0] == '#' && tag[1] == '\0')) {
+    memset(_prefs.default_scope_name, 0, sizeof(_prefs.default_scope_name));
     memset(_prefs.default_scope_key, 0, sizeof(_prefs.default_scope_key));   // unscoped
   } else {
+    strncpy(_prefs.default_scope_name, tag, sizeof(_prefs.default_scope_name) - 1);
+    _prefs.default_scope_name[sizeof(_prefs.default_scope_name) - 1] = '\0';
     SHA256 sha;
     sha.update(tag, strlen(tag));
     sha.finalize(_prefs.default_scope_key, sizeof(_prefs.default_scope_key));
     send_unscoped = false;   // make sure the scope is actually applied on send
+    ensureRegionWithParents(_region_reg, tag);
   }
   savePrefs();
 }
@@ -4252,7 +4373,12 @@ void MyMesh::begin(bool has_display) {
   // ensureRegion() is idempotent, so re-running this every boot is a no-op after
   // the first, and a slot once assigned is never renumbered.
   _region_reg.begin(_store->getPrimaryFS());
-  if (_prefs.default_scope_name[0]) _region_reg.ensureRegion(_prefs.default_scope_name);
+  if (_prefs.default_scope_name[0]) {
+    ensureRegionWithParents(_region_reg, _prefs.default_scope_name);
+#if defined(ESP32) && defined(HAS_TOUCH_UI)
+    touchPrefsSetRegionScope(_prefs.default_scope_name);
+#endif
+  }
 
 #ifdef BLE_PIN_CODE // 123456 by default
   if (_prefs.ble_pin == 0) {
@@ -4547,23 +4673,27 @@ void MyMesh::handleCmdFrame(size_t len) {
           _ui->appendDiag(line);
         }
       } else if (!skip_radio_send) {
-        // Force node-side unique timestamp for plain sends as well.
-        // Some clients may resend/reuse app timestamps, which can cause repeated packet hashes
-        // and replay-like suppression on receivers.
-        msg_timestamp = getRTCClock()->getCurrentTimeUnique();
-        uint32_t tx_hash4 = 0;
-        TxtTxDebugInfo dbg{};
-        result = sendMessage(*recipient, msg_timestamp, attempt, text, expected_ack, est_timeout, &tx_hash4, &dbg);
-        if (_ui) {
-          char line[192];
-          snprintf(line, sizeof(line), "TX CMD src=CMD_SEND_TXT_MSG kind=PLAIN ts=%lu att=%u r=%d ack=%lu h=%08lX core_ts=%lu core_att=%u n=%u",
-                   static_cast<unsigned long>(msg_timestamp), static_cast<unsigned>(attempt), result,
-                   static_cast<unsigned long>(expected_ack),
-                   static_cast<unsigned long>(tx_hash4),
-                   static_cast<unsigned long>(dbg.uniq_ts),
-                   static_cast<unsigned>(dbg.uniq_attempt),
-                   static_cast<unsigned>(dbg.nonce));
-          _ui->appendDiag(line);
+        if (recipient->type == ADV_TYPE_REPEATER && isRepeaterPingCmd(text)) {
+          result = uiSendRepeaterDmPing(*recipient, expected_ack, est_timeout);
+        } else {
+          // Force node-side unique timestamp for plain sends as well.
+          // Some clients may resend/reuse app timestamps, which can cause repeated packet hashes
+          // and replay-like suppression on receivers.
+          msg_timestamp = getRTCClock()->getCurrentTimeUnique();
+          uint32_t tx_hash4 = 0;
+          TxtTxDebugInfo dbg{};
+          result = sendMessage(*recipient, msg_timestamp, attempt, text, expected_ack, est_timeout, &tx_hash4, &dbg);
+          if (_ui) {
+            char line[192];
+            snprintf(line, sizeof(line), "TX CMD src=CMD_SEND_TXT_MSG kind=PLAIN ts=%lu att=%u r=%d ack=%lu h=%08lX core_ts=%lu core_att=%u n=%u",
+                     static_cast<unsigned long>(msg_timestamp), static_cast<unsigned>(attempt), result,
+                     static_cast<unsigned long>(expected_ack),
+                     static_cast<unsigned long>(tx_hash4),
+                     static_cast<unsigned long>(dbg.uniq_ts),
+                     static_cast<unsigned>(dbg.uniq_attempt),
+                     static_cast<unsigned>(dbg.nonce));
+            _ui->appendDiag(line);
+          }
         }
       }
       if (result == MSG_SEND_FAILED) {
@@ -4639,7 +4769,7 @@ void MyMesh::handleCmdFrame(size_t len) {
         // ALL boards — this sat behind HAS_TANMATSU from its beta_17 birth, so T-Deck/V4 users
         // never saw their own app-sent channel posts on the device. Repeater echoes of our own
         // flood can't double the bubble: the dispatcher's seen-packet table drops them pre-ingest.
-        if (_ui) { cmd_frame[len] = 0; _ui->appSentMsgToChannel(channel.name, text); }
+        if (_ui) { cmd_frame[len] = 0; _ui->appSentMsgToChannel(channel.name, text, uiLastSentFp()); }
         // Sent channel messages are not added to shared history / broadcast: channel_idx and
         // frame format are device-specific and clients (e.g. HA) without channel support can
         // misparse or show "text as sender"; also avoids failed-to-sync when versions differ.
@@ -5630,7 +5760,12 @@ void MyMesh::handleCmdFrame(size_t len) {
       if (n > 0 && n < 31) {
         strcpy(_prefs.default_scope_name, (char *)&cmd_frame[1]);
         memcpy(_prefs.default_scope_key, &cmd_frame[1 + 31], 16);
+        send_unscoped = false;
         savePrefs();
+#if defined(ESP32) && defined(HAS_TOUCH_UI)
+        touchPrefsSetRegionScope(_prefs.default_scope_name);
+#endif
+        ensureRegionWithParents(_region_reg, _prefs.default_scope_name);
         writeOKFrame();
       } else {
         writeErrFrame(ERR_CODE_ILLEGAL_ARG);
@@ -5639,6 +5774,9 @@ void MyMesh::handleCmdFrame(size_t len) {
       memset(_prefs.default_scope_name, 0, sizeof(_prefs.default_scope_name));  // null = unscoped
       memset(_prefs.default_scope_key, 0, sizeof(_prefs.default_scope_key));
       savePrefs();
+#if defined(ESP32) && defined(HAS_TOUCH_UI)
+      touchPrefsSetRegionScope("");
+#endif
       writeOKFrame();
     }
   } else if (cmd_frame[0] == CMD_GET_DEFAULT_FLOOD_SCOPE) {
@@ -6259,23 +6397,34 @@ void MyMesh::checkCLIRescueCmd() {
       } else {
         Serial.println("  Error: erase failed");
       }
-    } else if (memcmp(cli_command, "ls", 2) == 0) {
+    } else if (strcmp(cli_command, "ls") == 0 || memcmp(cli_command, "ls ", 3) == 0) {
 
-      // get path from command e.g: "ls /adafruit"
-      const char *path = &cli_command[3];
+      // get path from command e.g: "ls /adafruit" or bare "ls"
+      const char *path = (cli_command[2] == ' ') ? &cli_command[3] : "/";
+      if (path[0] == '\0') path = "/";
 
       bool is_fs2 = false;
+      bool is_sd = false;
       if (memcmp(path, "UserData/", 9) == 0) {
         path += 8; // skip "UserData"
       } else if (memcmp(path, "ExtraFS/", 8) == 0) {
         path += 7; // skip "ExtraFS"
         is_fs2 = true;
+      } else if (strcmp(path, "/sd") == 0 || strcmp(path, "SD") == 0) {
+        path = "/";
+        is_sd = true;
+      } else if (memcmp(path, "/sd/", 4) == 0) {
+        path += 3; // keep leading '/'
+        is_sd = true;
+      } else if (memcmp(path, "SD/", 3) == 0) {
+        path += 2; // keep leading '/'
+        is_sd = true;
       }
       Serial.printf("Listing files in %s\n", path);
 
       // log each file and directory
-      File root = _store->openRead(path);
-      if (is_fs2 == false) {
+      if (is_fs2 == false && is_sd == false) {
+        File root = _store->openRead(path);
         if (root) {
           File file = root.openNextFile();
           while (file) {
@@ -6291,7 +6440,7 @@ void MyMesh::checkCLIRescueCmd() {
         }
       }
 
-      if (is_fs2 == true || strlen(path) == 0 || strcmp(path, "/") == 0) {
+      if (is_sd == false && (is_fs2 == true || strlen(path) == 0 || strcmp(path, "/") == 0)) {
         if (_store->getSecondaryFS() != nullptr) {
           File root2 = _store->openRead(_store->getSecondaryFS(), path);
           File file = root2.openNextFile();
@@ -6307,37 +6456,82 @@ void MyMesh::checkCLIRescueCmd() {
           root2.close();
         }
       }
+
+#if defined(ESP32)
+      if (is_sd == true || (is_fs2 == false && (strlen(path) == 0 || strcmp(path, "/") == 0))) {
+        File sd_root = _store->openSdRead(path);
+        if (sd_root) {
+          const char* pfx = (strcmp(path, "/") == 0) ? "" : path;
+          File file = sd_root.openNextFile();
+          while (file) {
+            if (file.isDirectory()) {
+              Serial.printf("[dir]  /sd%s/%s\n", pfx, file.name());
+            } else {
+              Serial.printf("[file] /sd%s/%s (%d bytes)\n", pfx, file.name(), file.size());
+            }
+            file = sd_root.openNextFile();
+          }
+          sd_root.close();
+        }
+      }
+#endif
     } else if (memcmp(cli_command, "cat", 3) == 0) {
 
       // get path from command e.g: "cat /contacts3"
-      const char *path = &cli_command[4];
-      
+      const char *path = (cli_command[3] == ' ') ? &cli_command[4] : "";
+
       bool is_fs2 = false;
+      bool is_sd = false;
       if (memcmp(path, "UserData/", 9) == 0) {
         path += 8; // skip "UserData"
       } else if (memcmp(path, "ExtraFS/", 8) == 0) {
         path += 7; // skip "ExtraFS"
         is_fs2 = true;
+      } else if (memcmp(path, "/sd/", 4) == 0) {
+        path += 3; // keep leading '/'
+        is_sd = true;
+      } else if (memcmp(path, "SD/", 3) == 0) {
+        path += 2; // keep leading '/'
+        is_sd = true;
+      } else if (path[0] == '/') {
+        // allow direct absolute path (UserData or fallback to SD root)
       } else {
-        Serial.println("Invalid path provided, must start with UserData/ or ExtraFS/");
+        Serial.println("Invalid path provided, must start with UserData/, ExtraFS/, or /sd/");
         cli_command[0] = 0;
         return;
       }
 
       // log file content as hex
-      File file = _store->openRead(path);
+      File file;
+#if defined(ESP32)
+      if (is_sd) {
+        file = _store->openSdRead(path);
+      } else
+#endif
       if (is_fs2 == true) {
         file = _store->openRead(_store->getSecondaryFS(), path);
+      } else {
+        file = _store->openRead(path);
+#if defined(ESP32)
+        if (!file) {
+          file = _store->openSdRead(path);
+        }
+#endif
       }
-      if(file){
+      if (file) {
 
-        // get file content
-        int file_size = file.available();
-        uint8_t buffer[file_size];
-        file.read(buffer, file_size);
-
-        // print hex
-        mesh::Utils::printHex(Serial, buffer, file_size);
+        // Stream in bounded 256-byte chunks so files >8 KB cannot overflow loopTask stack,
+        // yielding every 16 chunks (4 KB) so large files do not trigger Task-WDT.
+        uint8_t buffer[256];
+        uint32_t chunks = 0;
+        while (file.available() > 0) {
+          int n = file.read(buffer, sizeof(buffer));
+          if (n <= 0) break;
+          mesh::Utils::printHex(Serial, buffer, n);
+          if ((++chunks & 0x0F) == 0) {
+            delay(1);
+          }
+        }
         Serial.print("\n");
 
         file.close();
@@ -6349,27 +6543,47 @@ void MyMesh::checkCLIRescueCmd() {
       const char *path = &cli_command[3];
       MESH_DEBUG_PRINTLN("Removing file: %s", path);
       // ensure path is not empty, or root dir
-      if(!path || strlen(path) == 0 || strcmp(path, "/") == 0){
+      if (!path || strlen(path) == 0 || strcmp(path, "/") == 0 ||
+          strcmp(path, "/sd") == 0 || strcmp(path, "/sd/") == 0 ||
+          strcmp(path, "SD") == 0 || strcmp(path, "SD/") == 0) {
         Serial.println("Invalid path provided");
       } else {
-      bool is_fs2 = false;
-      if (memcmp(path, "UserData/", 9) == 0) {
-        path += 8; // skip "UserData"
-      } else if (memcmp(path, "ExtraFS/", 8) == 0) {
-        path += 7; // skip "ExtraFS"
-        is_fs2 = true;
-      }
+        bool is_fs2 = false;
+        bool is_sd = false;
+        if (memcmp(path, "UserData/", 9) == 0) {
+          path += 8; // skip "UserData"
+        } else if (memcmp(path, "ExtraFS/", 8) == 0) {
+          path += 7; // skip "ExtraFS"
+          is_fs2 = true;
+        } else if (memcmp(path, "/sd/", 4) == 0) {
+          path += 3; // keep leading '/'
+          is_sd = true;
+        } else if (memcmp(path, "SD/", 3) == 0) {
+          path += 2; // keep leading '/'
+          is_sd = true;
+        }
 
         // remove file
-        bool removed;
+        bool removed = false;
+#if defined(ESP32)
+        if (is_sd) {
+          MESH_DEBUG_PRINTLN("Removing file from SD: %s", path);
+          removed = _store->removeSdFile(path);
+        } else
+#endif
         if (is_fs2) {
           MESH_DEBUG_PRINTLN("Removing file from ExtraFS: %s", path);
           removed = _store->removeFile(_store->getSecondaryFS(), path);
         } else {
           MESH_DEBUG_PRINTLN("Removing file from UserData: %s", path);
           removed = _store->removeFile(path);
+#if defined(ESP32)
+          if (!removed) {
+            removed = _store->removeSdFile(path);
+          }
+#endif
         }
-        if(removed){
+        if (removed) {
           Serial.println("File removed");
         } else {
           Serial.println("Failed to remove file");
@@ -6600,20 +6814,34 @@ void MyMesh::loop() {
     // letter (a-z, A-Z). App binary frames use command bytes 1–62; 32–62 are
     // printable, so we must not treat them as console or we break USB app connection.
 #if defined(ESP32)
-    if (Serial.available() > 0) {
+    while (Serial.available() > 0) {
+#if defined(MULTI_TRANSPORT_COMPANION)
+      if (MultiTransportCompanionInterface::isUsbFrameInProgress()) {
+        break;
+      }
+#endif
+      if (cli_command[0] != '\0') {
+        if (Serial.peek() == '<') {
+          cli_command[0] = 0;
+          break;
+        }
+        checkCLIRescueCmd();
+        continue;
+      }
       int first = Serial.peek();
       // Web consoles often send CRLF. Drop a leading line-ending byte so a
       // stale '\r'/'\n' cannot block the next plain-text command.
       if (first == '\r' || first == '\n') {
         Serial.read();
-        if (Serial.available() > 0) {
-          first = Serial.peek();
-        }
+        continue;
       }
       if (first == '<') {
         // Companion frame marker: handled below by checkSerialInterface().
+        break;
       } else if ((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z')) {
         checkCLIRescueCmd();
+      } else {
+        break;
       }
     }
 #endif

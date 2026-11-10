@@ -380,12 +380,53 @@ public:
     /* Clear any stale serial-side status pending so the legacy match doesn't
      * eat our reply before the UI hook sees it. */
     pending_status = 0;
-    int r = sendRequest(recipient, REQ_TYPE_GET_STATUS, tag, est);
+    ContactInfo req_rcpt = recipient;
+    if (req_rcpt.type == ADV_TYPE_REPEATER) {
+      // Force flood on repeater status pings so simple_repeater hits its
+      // packet->isRouteFlood() createPathReturn + sendFloodReply branch instead
+      // of replying over a stale 0-hop client->out_path when the user has moved.
+      req_rcpt.out_path_len = OUT_PATH_UNKNOWN;
+    }
+    int r = sendRequest(req_rcpt, REQ_TYPE_GET_STATUS, tag, est);
     if (r == MSG_SEND_SENT_FLOOD || r == MSG_SEND_SENT_DIRECT) {
       memcpy(&_ui_pending_status, recipient.id.pub_key, 4);
       _ui_pending_kind = UiReqKind::Status;
       _ui_pending_tag  = tag;   // request tag, reflected by the repeater
       _ui_pending_at   = millis();
+    }
+    return r;
+  }
+
+  static bool isRepeaterPingCmd(const char* text) {
+    if (!text) return false;
+    while (*text == ' ' || *text == '\t') ++text;
+    if (strncasecmp(text, "ping", 4) != 0) return false;
+    text += 4;
+    while (*text == ' ' || *text == '\t' || *text == '?' || *text == '!' ||
+           *text == '\r' || *text == '\n') {
+      ++text;
+    }
+    return *text == '\0';
+  }
+
+  /** Send a repeater status ping from a DM chat thread ("ping" to an ADV_TYPE_REPEATER).
+   *  Repeaters treat PAYLOAD_TYPE_TXT_MSG as an admin CLI command ("Unknown command")
+   *  and reply via stale direct out_path even when the DM arrived via flood. Routing
+   *  DM "ping" through flooded REQ_TYPE_GET_STATUS works on any repeater (admin or guest),
+   *  triggers simple_repeater's flood PATH+RESPONSE return, and synthesizes a PONG DM
+   *  bubble when onContactResponse receives the RepeaterStats payload. */
+  int uiSendRepeaterDmPing(ContactInfo& recipient, uint32_t& out_ack_tag, uint32_t& out_est_timeout) {
+    uiResetPathForLogin(recipient);
+    int r = uiSendRequestAfterGuestLogin(recipient, UiReqKind::Status);
+    out_ack_tag = (_ui_pending_tag != 0) ? _ui_pending_tag : getRTCClock()->getCurrentTimeUnique();
+    out_est_timeout = 12000u;
+    if (r == MSG_SEND_SENT_FLOOD || r == MSG_SEND_SENT_DIRECT) {
+      _ui_dm_ping_active  = true;
+      _ui_dm_ping_ack     = out_ack_tag;
+      _ui_dm_ping_sent_ms = millis();
+      memcpy(_ui_dm_ping_pub, recipient.id.pub_key, PUB_KEY_SIZE);
+    } else {
+      _ui_dm_ping_active = false;
     }
     return r;
   }
@@ -421,7 +462,10 @@ public:
   int sendStatusPingWithGuestLoginForUI(ContactInfo& recipient) {
     if (contactNeedsGuestLogin(recipient)) {
       uint32_t login_est = 0;
-      sendLogin(recipient, "", login_est);
+      _flood_path_hash_size_override = UI_LOGIN_FLOOD_HASH_SIZE;
+      int r = sendLogin(recipient, "", login_est);
+      _flood_path_hash_size_override = 0;
+      (void)r;
     }
     return sendStatusPingForUI(recipient);
   }
@@ -431,7 +475,10 @@ public:
   int sendTelemetryRequestWithGuestLoginForUI(ContactInfo& recipient) {
     if (contactNeedsGuestLogin(recipient)) {
       uint32_t login_est = 0;
-      sendLogin(recipient, "", login_est);
+      _flood_path_hash_size_override = UI_LOGIN_FLOOD_HASH_SIZE;
+      int r = sendLogin(recipient, "", login_est);
+      _flood_path_hash_size_override = 0;
+      (void)r;
     }
     return sendTelemetryRequestForUI(recipient);
   }
@@ -492,7 +539,9 @@ public:
   int uiSendRequestViaGuestLogin(ContactInfo& recipient, UiReqKind kind) {
     uiResetPathForLogin(recipient);
     uint32_t login_est = 0;
+    _flood_path_hash_size_override = UI_LOGIN_FLOOD_HASH_SIZE;
     int r = sendLogin(recipient, "", login_est);
+    _flood_path_hash_size_override = 0;
     if (r == MSG_SEND_SENT_FLOOD || r == MSG_SEND_SENT_DIRECT) {
       memcpy(&_ui_login_then, recipient.id.pub_key, 4);
       _ui_login_then_kind = kind;
@@ -583,6 +632,7 @@ public:
     _ui_pending_status = 0;
     _ui_pending_kind   = UiReqKind::None;
     _ui_pending_tag    = 0;
+    _ui_dm_ping_active = false;
   }
   /** Disarm a deferred guest-login-then-request (see uiSendRequestAfterGuestLogin)
    *  so a late LOGIN-OK can't fire a REQ after the UI gave up. Kept separate from
@@ -635,6 +685,7 @@ public:
    *  handler already does this for app-originated messages; the touch UI
    *  reaches sendMessage directly and skipped this until now. */
   void uiRegisterExpectedAck(uint32_t expected_ack, const uint8_t pub_key[32]);
+  void onMqttDirectMessageRecv(const uint8_t* sender_prefix6, const char* text);
 
   // ---- "Repeats heard" for sent floods + route of the last received flood ----
   // When we originate a flood TXT, repeaters re-broadcast it and our own radio
@@ -645,8 +696,9 @@ public:
   // _last_rx_path holds the path hashes of the just-received flood so the UI's
   // newMsg* handler (called synchronously next) can stash the inbound route.
   static const int UI_ECHO_SLOTS = 12;
-  uint32_t _echo_fp[UI_ECHO_SLOTS]  = {0};
-  uint8_t  _echo_rep[UI_ECHO_SLOTS] = {0};
+  uint32_t _echo_fp[UI_ECHO_SLOTS]       = {0};
+  uint32_t _echo_canon_fp[UI_ECHO_SLOTS] = {0};
+  uint8_t  _echo_rep[UI_ECHO_SLOTS]      = {0};
   static const int ECHO_MAX_HOPS = 3;                         // repeaters remembered per echoed send
   uint8_t  _echo_hop[UI_ECHO_SLOTS][ECHO_MAX_HOPS][4] = {};   // last-hop hash of each distinct echo
   uint8_t  _echo_hop_sz[UI_ECHO_SLOTS] = {0};                 // hash size used for those hops
@@ -661,6 +713,8 @@ public:
   // REGION_SLOT_AMBIGUOUS when several matched, or REGION_SLOT_NONE. Widens the
   // one-key _last_rx_scope_home check above to every region the user tracks.
   uint8_t  _last_rx_scope_slot = REGION_SLOT_NONE;
+  uint8_t  _last_heard_scope_slot = 0;
+  uint32_t _last_heard_scope_ms   = 0;
   RegionRegistry _region_reg;
   bool     _last_rx_has_scope = false; // false if the packet carried no transport codes
   uint32_t _last_sender_ts    = 0;     // embedded send-time of the last inbound msg (UI bubble ts; 0 = use now)
@@ -675,6 +729,8 @@ public:
   int8_t   uiSignalSnrQ4() const { return _ui_sig_snr_q4; }
   int8_t   uiSignalRssi()  const { return _ui_sig_rssi; }
   uint32_t uiSignalMs()    const { return _ui_sig_ms; }
+  int8_t   getLastRxSnrQ4() const { return _radio ? (int8_t)(_radio->getLastSNR() * 4.0f) : 0; }
+  int16_t  getLastRxRssi()  const { return _radio ? (int16_t)_radio->getLastRSSI() : 0; }
 
   // ---- Discover scan (the Discover app: active node-discovery, ALL node types) ----
   // uiStartDiscoverScan() broadcasts a zero-hop NODE_DISCOVER_REQ with a type filter + a fresh
@@ -687,7 +743,7 @@ public:
     int8_t   our_snr_q4;    // our RX SNR*4 of their reply (forward link)
     int8_t   our_rssi;      // our RX RSSI dBm of their reply
     int8_t   their_snr_q4;  // their RX SNR*4 of our request (reverse link — RESP payload[1])
-    uint8_t  path_len;      // hops the reply travelled (0 = heard directly, i.e. in RF range)
+    uint8_t  path_len = 0;  // hops the reply/advert travelled (0 = heard directly, >0 = multi-hop advert)
     uint32_t first_ms;      // millis() first heard this session
     uint32_t last_ms;       // millis() last heard
     uint16_t heard;         // reply count
@@ -704,7 +760,11 @@ public:
   void     discoverClear() { _discover_cnt = 0; }
   uint32_t discoverScanMs() const { return _discover_scan_ms; }
   void     discoverUpsert(const uint8_t* pk, uint8_t pklen, uint8_t node_type,
-                          int8_t our_snr_q4, int8_t our_rssi, int8_t their_snr_q4, uint8_t path_len);
+                          int8_t our_snr_q4, int8_t our_rssi, int8_t their_snr_q4, uint8_t path_len = 0);
+  void     discoverUpsert(uint8_t node_type, int8_t their_snr_q4, int8_t our_snr_q4, int16_t rssi,
+                          const uint8_t* pub_key, uint8_t key_len, uint8_t path_len = 0) {
+    discoverUpsert(pub_key, key_len, node_type, our_snr_q4, (int8_t)rssi, their_snr_q4, path_len);
+  }
 
   // ---- Recent-RX ring (RF Monitor app) ----
   // One record per received frame, captured in logRxRaw(): payload type / route
@@ -838,6 +898,10 @@ public:
       _last_rx_scope_slot = pkt->transport_codes[0]
                               ? _region_reg.matchPacket(pkt, pkt->transport_codes[0])
                               : REGION_SLOT_NONE;
+      if (_last_rx_scope_slot > 0 && _last_rx_scope_slot <= REGION_SLOT_MAX) {
+        _last_heard_scope_slot = _last_rx_scope_slot;
+        _last_heard_scope_ms   = millis();
+      }
     }
   }
   /** Region registry backing the scope naming above (#271). */
@@ -852,8 +916,35 @@ public:
   void uiTrackSentFp(uint32_t fp) {
     if (fp == 0) return;
     _last_sent_fp = fp;
-    for (int i = 0; i < UI_ECHO_SLOTS; i++) if (_echo_fp[i] == fp) { _echo_rep[i] = 0; _echo_hop_n[i] = 0; return; }
-    _echo_fp[_echo_idx] = fp; _echo_rep[_echo_idx] = 0; _echo_hop_n[_echo_idx] = 0;
+    for (int i = 0; i < UI_ECHO_SLOTS; i++) {
+      if (_echo_fp[i] == fp) {
+        _echo_canon_fp[i] = fp;
+        _echo_rep[i] = 0;
+        _echo_hop_n[i] = 0;
+        return;
+      }
+    }
+    _echo_fp[_echo_idx] = fp;
+    _echo_canon_fp[_echo_idx] = fp;
+    _echo_rep[_echo_idx] = 0;
+    _echo_hop_n[_echo_idx] = 0;
+    _echo_idx = (uint8_t)((_echo_idx + 1) % UI_ECHO_SLOTS);
+  }
+
+  /** Map a re-encrypted retry clone's fingerprint to the original bubble's fingerprint
+   *  without overwriting _last_sent_fp. */
+  void uiTrackRetryFp(uint32_t orig_fp, uint32_t retry_fp) {
+    if (orig_fp == 0 || retry_fp == 0) return;
+    for (int i = 0; i < UI_ECHO_SLOTS; i++) {
+      if (_echo_fp[i] == retry_fp) {
+        _echo_canon_fp[i] = orig_fp;
+        return;
+      }
+    }
+    _echo_fp[_echo_idx] = retry_fp;
+    _echo_canon_fp[_echo_idx] = orig_fp;
+    _echo_rep[_echo_idx] = 0;
+    _echo_hop_n[_echo_idx] = 0;
     _echo_idx = (uint8_t)((_echo_idx + 1) % UI_ECHO_SLOTS);
   }
 
@@ -864,23 +955,37 @@ public:
    *  echo of our own flood) — logRxRaw uses that to let the frame through to BLE
    *  for the app's "Repeats heard" (issue #94). */
   bool uiCountEcho(uint32_t fp, const uint8_t* hop = nullptr, uint8_t hop_sz = 0) {
-    for (int i = 0; i < UI_ECHO_SLOTS; i++)
+    if (fp == 0) return false;
+    int match_idx = -1;
+    uint32_t target_fp = fp;
+    for (int i = 0; i < UI_ECHO_SLOTS; i++) {
       if (_echo_fp[i] == fp) {
-        if (_echo_rep[i] < 255) _echo_rep[i]++;
-        _echo_dirty = true;
-        if (hop && hop_sz > 0 && hop_sz <= 4 && _echo_hop_n[i] < ECHO_MAX_HOPS) {
-          bool seen = false;
-          for (uint8_t k = 0; k < _echo_hop_n[i]; k++)
-            if (_echo_hop_sz[i] == hop_sz && memcmp(_echo_hop[i][k], hop, hop_sz) == 0) { seen = true; break; }
-          if (!seen) {
-            memcpy(_echo_hop[i][_echo_hop_n[i]], hop, hop_sz);
-            _echo_hop_sz[i] = hop_sz;
-            _echo_hop_n[i]++;
-          }
-        }
-        return true;
+        match_idx = i;
+        if (_echo_canon_fp[i] != 0) target_fp = _echo_canon_fp[i];
+        break;
       }
-    return false;
+    }
+    if (match_idx < 0) return false;
+    for (int i = 0; i < UI_ECHO_SLOTS; i++) {
+      if (_echo_fp[i] == target_fp && _echo_canon_fp[i] == target_fp) {
+        match_idx = i;
+        break;
+      }
+    }
+    int i = match_idx;
+    if (_echo_rep[i] < 255) _echo_rep[i]++;
+    _echo_dirty = true;
+    if (hop && hop_sz > 0 && hop_sz <= 4 && _echo_hop_n[i] < ECHO_MAX_HOPS) {
+      bool seen = false;
+      for (uint8_t k = 0; k < _echo_hop_n[i]; k++)
+        if (_echo_hop_sz[i] == hop_sz && memcmp(_echo_hop[i][k], hop, hop_sz) == 0) { seen = true; break; }
+      if (!seen) {
+        memcpy(_echo_hop[i][_echo_hop_n[i]], hop, hop_sz);
+        _echo_hop_sz[i] = hop_sz;
+        _echo_hop_n[i]++;
+      }
+    }
+    return true;
   }
   /** True once if a repeat was counted since the last call — the UI uses this
    *  to refresh the chat so the bubble's repeat tag updates live. */
@@ -922,13 +1027,14 @@ public:
    *  Returns 0 on failure. */
   uint32_t uiSendTracePing(const uint8_t pub_key[32]) {
     if (!pub_key) return 0;
-    uint8_t hash_sz = (uint8_t)(_prefs.path_hash_mode + 1);
-    if (hash_sz == 0 || hash_sz > 4) hash_sz = 1;
-    uint8_t flags = (uint8_t)(_prefs.path_hash_mode & 0x03);
+    // Always use 1-byte trace hop hashes (flags = 0 -> 1 << 0 = 1 byte) for
+    // universal compatibility across 1B/2B/3B repeaters and to avoid the
+    // path_hash_mode==2 (3B vs 1<<2=4B) mismatch in Mesh::onRecvPacket.
+    const uint8_t flags = 0;
+    const uint8_t hash_sz = 1;
     uint32_t tag = 0;
     getRNG()->random((uint8_t*)&tag, sizeof(tag));
     if (tag == 0) tag = 1;
-    // Stash so onTraceRecv can route the right callback to the UI.
     _ui_trace_ping_tag = tag;
     mesh::Packet* pkt = createTrace(tag, 0, flags);
     if (!pkt) { _ui_trace_ping_tag = 0; return 0; }
@@ -936,28 +1042,67 @@ public:
     return tag;
   }
 
-  /** Send a FULL-ROUTE trace toward `c` along its entire known path, so every
-   *  repeater on the way appends its RX-SNR (vs uiSendTracePing, which only
-   *  probes the immediate neighbour). The result arrives via the same
-   *  onTracePingResult callback, but with one SNR reading per hop. Falls back
-   *  to a single-hop trace when the path to `c` is unknown (flood-routed
-   *  contact — there's no fixed path to walk). Returns the tag, 0 on failure. */
+  /** Send a FULL-ROUTE round-trip trace toward `c` along its known out_path (or
+   *  most recent advert_path) and back to our 0-hop neighbour repeater so the
+   *  final retransmission reaches our radio and fires onTraceRecv with per-hop
+   *  SNRs. Falls back to a single-hop trace when `c` is a direct neighbour. */
   uint32_t uiSendTraceRoute(const ContactInfo& c) {
-    uint8_t flags = (uint8_t)(_prefs.path_hash_mode & 0x03);
+    const uint8_t flags = 0;   // 1 byte per hop (1 << 0 = 1)
+    uint8_t fwd_hops[16];
+    uint8_t k = 0;
+
+    if (c.out_path_len != OUT_PATH_UNKNOWN && (c.out_path_len & 63) > 0) {
+      const uint8_t hsz = (uint8_t)(((c.out_path_len >> 6) & 0x03) + 1);
+      const uint8_t cnt = (uint8_t)(c.out_path_len & 63);
+      if (hsz <= 3 && (uint16_t)cnt * hsz <= MAX_PATH_SIZE) {
+        for (uint8_t i = 0; i < cnt && k < sizeof(fwd_hops); ++i) {
+          fwd_hops[k++] = c.out_path[i * hsz];
+        }
+      }
+    }
+    if (k == 0) {
+      uint8_t adv_plen = 0;
+      uint8_t adv_path[MAX_PATH_SIZE];
+      if (getAdvertPath(c.id.pub_key, PUB_KEY_SIZE, adv_plen, adv_path, sizeof(adv_path))) {
+        const uint8_t hsz = (uint8_t)(((adv_plen >> 6) & 0x03) + 1);
+        const uint8_t cnt = (uint8_t)(adv_plen & 63);
+        if (cnt > 0 && hsz <= 3 && (uint16_t)cnt * hsz <= MAX_PATH_SIZE) {
+          // advert_paths stores inbound order (contact's neighbour first, our
+          // neighbour last); reverse into forward order (our neighbour first).
+          for (int i = (int)cnt - 1; i >= 0 && k < (int)sizeof(fwd_hops); --i) {
+            fwd_hops[k++] = adv_path[i * hsz];
+          }
+        }
+      }
+    }
+
+    uint8_t trace_buf[36];
+    uint8_t trace_len = 0;
+    if (k == 0) {
+      trace_buf[trace_len++] = c.id.pub_key[0];
+    } else {
+      for (uint8_t i = 0; i < k && trace_len < sizeof(trace_buf); ++i) {
+        trace_buf[trace_len++] = fwd_hops[i];
+      }
+      if (c.type == ADV_TYPE_REPEATER && trace_len < sizeof(trace_buf)) {
+        trace_buf[trace_len++] = c.id.pub_key[0];
+        for (int i = (int)k - 1; i >= 0 && trace_len < (int)sizeof(trace_buf); --i) {
+          trace_buf[trace_len++] = fwd_hops[i];
+        }
+      } else {
+        for (int i = (int)k - 2; i >= 0 && trace_len < (int)sizeof(trace_buf); --i) {
+          trace_buf[trace_len++] = fwd_hops[i];
+        }
+      }
+    }
+
     uint32_t tag = 0;
     getRNG()->random((uint8_t*)&tag, sizeof(tag));
     if (tag == 0) tag = 1;
     _ui_trace_ping_tag = tag;
     mesh::Packet* pkt = createTrace(tag, 0, flags);
     if (!pkt) { _ui_trace_ping_tag = 0; return 0; }
-    if (c.out_path_len != OUT_PATH_UNKNOWN && c.out_path_len > 0 &&
-        c.out_path_len <= MAX_PATH_SIZE) {             // clamp: a corrupt out_path_len (>64)
-      sendDirect(pkt, c.out_path, c.out_path_len);   // would overrun sendDirect's payload memcpy -> reboot
-    } else {
-      uint8_t hash_sz = (uint8_t)(_prefs.path_hash_mode + 1);
-      if (hash_sz == 0 || hash_sz > 4) hash_sz = 1;
-      sendDirect(pkt, c.id.pub_key, hash_sz);         // unknown path → single hop
-    }
+    sendDirect(pkt, trace_buf, trace_len);
     return tag;
   }
 
@@ -1488,6 +1633,10 @@ private:
   uint8_t   _ui_deferred_key[PUB_KEY_SIZE] = {0};
   UiReqKind _ui_deferred_kind = UiReqKind::None;
   uint32_t  _ui_deferred_at = 0;
+  bool      _ui_dm_ping_active = false;
+  uint32_t  _ui_dm_ping_ack = 0;
+  uint32_t  _ui_dm_ping_sent_ms = 0;
+  uint8_t   _ui_dm_ping_pub[PUB_KEY_SIZE] = {0};
   BaseSerialInterface *_serial;
   AbstractUITask* _ui;
 
@@ -1500,7 +1649,7 @@ private:
   bool _iter_started;
   bool _cli_rescue;
   bool send_unscoped;   // force un-scoped flood (instead of using send_scope)
-  bool scope_direct_floods = false;  // opt-in (#64): tag direct/login/admin floods with the default region scope
+  bool scope_direct_floods = true;   // tag direct/login/admin floods with the default region scope so denyf * repeaters forward them
   // 200 not 80: the serial sideload ("fadd ...", see cliPutChunk) carries up
   // to ~130 chars per line; every other command is far shorter.
   char cli_command[200];
@@ -1644,6 +1793,8 @@ private:
     uint32_t retry_delay = 0;
     uint32_t missing_since = 0;
     uint8_t retry_key[MAX_HASH_SIZE] = {};
+    uint8_t last_tx_key[MAX_HASH_SIZE] = {};
+    uint32_t orig_fp = 0;
     uint8_t attempts_sent = 0;
     uint8_t max_attempts = 0;
     uint8_t priority = 0;
