@@ -4,6 +4,7 @@
 #include "M9Imu.h"
 #include <Arduino.h>
 #include <Wire.h>
+#include <math.h>
 
 // Bring-up aid, same role as M9_COMPASS_DEBUG: log the raw vector once a
 // second so the sensor's axis orientation on this board can be derived from

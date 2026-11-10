@@ -27,6 +27,7 @@
 #include <helpers/RefCountedDigitalPin.h>
 #include "esp32/TouchPrefsStore.h"
 #include <limits.h>
+#include <math.h>
 
 class WadaNmeaLocationProvider : public LocationProvider {
   char _nmeaBuffer[100];
