@@ -109,6 +109,9 @@ public:
   // an often-appended log never lands on GC-prone internal flash while a card
   // exists. NB removeFile(fs, name) above is NOT root-aware (legacy); these are.
   FILESYSTEM* getHotDataFS() const { return _getContactsChannelsFS(); }
+  FILESYSTEM* getSdFS() const;
+  File openSdRead(const char* path);
+  bool removeSdFile(const char* path);
   File openAppend(FILESYSTEM* fs, const char* filename);             // create if missing
   bool fileExists(FILESYSTEM* fs, const char* filename);
   bool mkdirRooted(FILESYSTEM* fs, const char* dir);                  // true if it exists afterwards

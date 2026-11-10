@@ -17,6 +17,7 @@ MqttBridge mqtt_bridge;
 #include "mbedtls/gcm.h"
 #include "mbedtls/md.h"
 #include "mbedtls/base64.h"
+#include "../../MyMesh.h"
 
 // Only hand bytes to lwIP when the socket can accept them right now (zero-timeout
 // select). Otherwise WiFiClient::write() blocks in 1 s select() retries against a
@@ -80,12 +81,16 @@ void MqttBridge::loadConfig() {
     _port = 1883;
 
     SdNvsPrefs p;
+    bool hasHost = false;
+    bool consent = false;
     if (p.begin("mqtt", true)) {
-        _requestedEnabled = p.getBool("en", false);
-        _port       = (uint16_t)p.getUInt("port", 1883);
-        _pubDm      = p.getBool("dm", false);
-        _pubChannel = p.getBool("ch", true);
-        if (p.isKey("host")) p.getString("host", _host, sizeof(_host));
+        hasHost           = p.isKey("host");
+        consent           = p.getBool("consent", false);
+        _requestedEnabled = consent && p.getBool("en", false);
+        _port             = (uint16_t)p.getUInt("port", 1883);
+        _pubDm            = consent && p.getBool("dm", false);
+        _pubChannel       = p.getBool("ch", true);
+        if (hasHost)         p.getString("host", _host, sizeof(_host));
         if (p.isKey("user")) p.getString("user", _user, sizeof(_user));
         if (p.isKey("pwd"))  p.getString("pwd",  _pwd,  sizeof(_pwd));
         if (p.isKey("psk"))  p.getString("psk",  _psk,  sizeof(_psk));
@@ -121,9 +126,10 @@ void MqttBridge::begin(const char* nodeHex) {
     if (!_enabled) return;
 
     _mqtt.setServer(_host, _port);
+    _mqtt.setCallback(MqttBridge::mqttCallback);
     _mqtt.setKeepAlive(60);
     _mqtt.setSocketTimeout(2);                  // bound connect/read — a dead broker must not stall loop()
-    _mqtt.setBufferSize(_encOn ? 1024 : 512);   // sealed base64 needs the bigger buffer
+    _mqtt.setBufferSize(_encOn ? 1024 : 768);   // sealed base64 (or 576B TX DM JSON) needs the bigger buffer
     Serial.printf("[MQTT] configured -> %s:%u dm=%d ch=%d enc=%d\n",
                   _host, _port, (int)_pubDm, (int)_pubChannel, (int)_encOn);
 }
@@ -149,6 +155,11 @@ bool MqttBridge::reconnect() {
     if (ok) {
         setStatusPhase(MqttBridgePhase::Connected, result, now, true);
         _mqtt.publish(lwtTopic, "online", true);
+        if (_pubDm && _encOn && _nodeHex[0]) {
+            char rxTopic[80];
+            snprintf(rxTopic, sizeof(rxTopic), "wadamesh/%s/rx/dm", _nodeHex);
+            _mqtt.subscribe(rxTopic);
+        }
         Serial.printf("[MQTT] connected as %s\n", clientId);
     } else {
         MqttBridgeStatus current;
@@ -189,8 +200,8 @@ void MqttBridge::loop() {
             setStatusPhase(MqttBridgePhase::RetryWait, _mqtt.state(), now, true,
                            now);
         }
-        if ((uint32_t)(now - _lastReconnectMs) >= RECONNECT_INTERVAL_MS) {
-            _lastReconnectMs = now;
+        if (_lastReconnectMs == 0 || (uint32_t)(now - _lastReconnectMs) >= RECONNECT_INTERVAL_MS) {
+            _lastReconnectMs = now ? now : 1;
             _connecting = true;
             setStatusPhase(MqttBridgePhase::Connecting, MQTT_DISCONNECTED,
                            now, false);
@@ -216,10 +227,11 @@ void MqttBridge::loop() {
 // use (mesh callbacks + loop() run on the same Arduino task), so the stack buffers
 // are safe. Returns false on any crypto/size failure (caller then publishes nothing).
 bool MqttBridge::sealToB64(const char* plain, char* out, size_t outCap) {
+    static constexpr size_t kMaxPlainLen = 576;
     size_t plen = strlen(plain);
-    if (plen > 480) return false;                 // matches the json[] producers below
+    if (plen > kMaxPlainLen) return false;        // matches the json[] producers below
 
-    uint8_t blob[12 + 480 + 16];
+    uint8_t blob[12 + kMaxPlainLen + 16];
     esp_fill_random(blob, 12);                    // fresh nonce per message
     uint8_t tag[16];
 
@@ -240,12 +252,69 @@ bool MqttBridge::sealToB64(const char* plain, char* out, size_t outCap) {
     return mbedtls_base64_encode((unsigned char*)out, outCap, &olen, blob, blobLen) == 0;
 }
 
+void MqttBridge::mqttCallback(char* topic, uint8_t* payload, unsigned int length) {
+    mqtt_bridge.onRxPacket(topic, payload, length);
+}
+
+bool MqttBridge::parseAuthenticatedRxDm(const char* plain, size_t len,
+                                        uint8_t outSenderPrefix[6], const char** outText) {
+    if (!plain || !outSenderPrefix || !outText || len < 14) return false;
+    if (plain[12] != ':' || plain[13] == '\0') return false;
+    bool anyNonZero = false;
+    bool anyNonFF   = false;
+    for (int i = 0; i < 6; ++i) {
+        auto hexVal = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+            if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+            return -1;
+        };
+        int hi = hexVal(plain[i * 2]);
+        int lo = hexVal(plain[i * 2 + 1]);
+        if (hi < 0 || lo < 0) return false;
+        uint8_t b = (uint8_t)((hi << 4) | lo);
+        outSenderPrefix[i] = b;
+        if (b != 0x00) anyNonZero = true;
+        if (b != 0xFF) anyNonFF   = true;
+    }
+    if (!anyNonZero || !anyNonFF) return false;
+    *outText = plain + 13;
+    return true;
+}
+
+void MqttBridge::onRxPacket(const char* topic, const uint8_t* payload, unsigned int length) {
+    if (!_enabled || !_pubDm || !_encOn || !_nodeHex[0] || !topic || !payload) return;
+    char expectedTopic[80];
+    snprintf(expectedTopic, sizeof(expectedTopic), "wadamesh/%s/rx/dm", _nodeHex);
+    if (strcmp(topic, expectedTopic) != 0) return;
+    if (length < 28 + 14 || length > 28 + 300) return;
+    const size_t clen = length - 28;
+    uint8_t plain[304];
+    mbedtls_gcm_context gcm;
+    mbedtls_gcm_init(&gcm);
+    int rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, _key, 256);
+    if (rc == 0) {
+        rc = mbedtls_gcm_auth_decrypt(&gcm, clen,
+                                      payload, 12,
+                                      nullptr, 0,
+                                      payload + 12, 16,
+                                      payload + 28, plain);
+    }
+    mbedtls_gcm_free(&gcm);
+    if (rc != 0) return;
+    plain[clen] = '\0';
+    uint8_t senderPrefix[6] = {};
+    const char* msgText = nullptr;
+    if (!parseAuthenticatedRxDm((const char*)plain, clen, senderPrefix, &msgText)) return;
+    the_mesh.onMqttDirectMessageRecv(senderPrefix, msgText);
+}
+
 void MqttBridge::pub(const char* subtopic, const char* json) {
     if (!_enabled || _connecting || !_mqtt.connected()) return;
     char topic[80];
     snprintf(topic, sizeof(topic), "wadamesh/%s/%s", _nodeHex, subtopic);
     if (_encOn) {
-        char b64[720];                            // base64 of the ~508-byte sealed blob
+        char b64[832];                            // base64 of the <=604-byte sealed blob
         if (sealToB64(json, b64, sizeof(b64))) _mqtt.publish(topic, b64);
     } else {
         _mqtt.publish(topic, json);
@@ -270,19 +339,35 @@ void MqttBridge::escapeJson(const char* src, char* dst, size_t dstLen) {
 }
 
 void MqttBridge::publishDM(const char* senderName, const uint8_t* senderKey32,
-                            float snr, uint8_t hops, uint32_t ts, const char* text) {
+                            float snr, uint8_t hops, uint32_t ts, const char* text,
+                            const char* dir, const char* recipientName,
+                            const uint8_t* recipientKey32) {
     if (!_enabled || !_pubDm || _connecting || !_mqtt.connected()) return;   // DMs are opt-in
+    if (!senderName || !senderKey32 || !text) return;
     char keyHex[13] = {};
     for (int i = 0; i < 6; ++i) snprintf(keyHex + i * 2, 3, "%02x", senderKey32[i]);
 
-    char safeName[48], safeText[300];
-    escapeJson(senderName, safeName, sizeof(safeName));
-    escapeJson(text,       safeText, sizeof(safeText));
+    char safeName[48], safeText[300], safeDir[8];
+    escapeJson(senderName,       safeName, sizeof(safeName));
+    escapeJson(text,             safeText, sizeof(safeText));
+    escapeJson(dir ? dir : "rx", safeDir,  sizeof(safeDir));
 
-    char json[480];
-    snprintf(json, sizeof(json),
-        "{\"sender\":\"%s\",\"key\":\"%s\",\"snr\":%.1f,\"hops\":%u,\"ts\":%lu,\"text\":\"%s\"}",
-        safeName, keyHex, snr, (unsigned)hops, (unsigned long)ts, safeText);
+    char json[576];
+    int written = 0;
+    if (recipientName && recipientKey32) {
+        char rcptKeyHex[13] = {};
+        for (int i = 0; i < 6; ++i) snprintf(rcptKeyHex + i * 2, 3, "%02x", recipientKey32[i]);
+        char safeRcpt[48];
+        escapeJson(recipientName, safeRcpt, sizeof(safeRcpt));
+        written = snprintf(json, sizeof(json),
+            "{\"dir\":\"%s\",\"sender\":\"%s\",\"key\":\"%s\",\"recipient\":\"%s\",\"recipient_key\":\"%s\",\"snr\":%.1f,\"hops\":%u,\"ts\":%lu,\"text\":\"%s\"}",
+            safeDir, safeName, keyHex, safeRcpt, rcptKeyHex, snr, (unsigned)hops, (unsigned long)ts, safeText);
+    } else {
+        written = snprintf(json, sizeof(json),
+            "{\"dir\":\"%s\",\"sender\":\"%s\",\"key\":\"%s\",\"snr\":%.1f,\"hops\":%u,\"ts\":%lu,\"text\":\"%s\"}",
+            safeDir, safeName, keyHex, snr, (unsigned)hops, (unsigned long)ts, safeText);
+    }
+    if (written <= 0 || (size_t)written >= sizeof(json)) return;
     pub("msg/dm", json);
 }
 
@@ -325,9 +410,10 @@ void MqttBridge::reloadConfig() {
     loadConfig();
     if (!_enabled) { Serial.println("[MQTT] disabled"); return; }
     _mqtt.setServer(_host, _port);
+    _mqtt.setCallback(MqttBridge::mqttCallback);
     _mqtt.setKeepAlive(60);
     _mqtt.setSocketTimeout(2);
-    _mqtt.setBufferSize(_encOn ? 1024 : 512);
+    _mqtt.setBufferSize(_encOn ? 1024 : 768);
     _lastReconnectMs = 0;   // reconnect on next loop() tick
     Serial.printf("[MQTT] reloaded -> %s:%u en=%d dm=%d ch=%d enc=%d\n",
                   _host, _port, (int)_enabled, (int)_pubDm, (int)_pubChannel, (int)_encOn);

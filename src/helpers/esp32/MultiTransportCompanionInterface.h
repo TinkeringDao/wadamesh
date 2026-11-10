@@ -111,6 +111,8 @@ public:
    *  coverage app once and moved on, on a link that cannot afford it. */
   static void bleSetRxLogFirehose(bool on) { s_ble_rxlog_all = on; }
   static bool bleRxLogFirehose() { return s_ble_rxlog_all; }
+  /** True while the USB companion stream is mid-frame ('<' seen, payload incomplete). */
+  static bool isUsbFrameInProgress();
   bool companionUnsolicitedPushesBroadcastToAll() const override { return _broadcast; }
   size_t checkRecvFrame(uint8_t dest[]) override;
 
