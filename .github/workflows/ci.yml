@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Cache PlatformIO
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.platformio
+          key: ${{ runner.os }}-pio-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            ${{ runner.os }}-pio-
+
+      - name: Run C++17 host unit tests
+        run: |
+          set -euo pipefail
+          ./scripts/run-host-tests.sh
+          shopt -s nullglob
+          for t in test/host_*.cpp; do
+            echo "Running $t"
+            g++ -std=c++17 -Wall -Wextra -O2 -Isrc -Itest "$t" -o /tmp/host_test && /tmp/host_test
+          done
+          echo "Running test/test_clock_floor.cpp"
+          g++ -std=c++17 -Wall -Wextra -O2 -Isrc -Itest/clock_hw_fakes test/test_clock_floor.cpp -o /tmp/test_clock_floor && /tmp/test_clock_floor
+
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade pip platformio
+
+      - name: Build companion touch firmware
+        run: |
+          set -euo pipefail
+          unset WIFI_SSID WIFI_PWD
+          pio run -e LilyGo_TDeck_companion_radio_touch
+          pio run -e ThinkNode_M9_companion_radio_touch
