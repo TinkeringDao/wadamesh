@@ -457,6 +457,80 @@ void testSplitLineSerialCliAssembly() {
   assert(h.companion_frames_seen == 1);
 }
 
+struct UsbFrameTrackerModel {
+  uint8_t  state = 0;
+  uint16_t frame_len = 0;
+  uint16_t rx_len = 0;
+  uint32_t last_byte_ms = 0;
+
+  void reset() { state = 0; frame_len = 0; rx_len = 0; last_byte_ms = 0; }
+  bool inProgress() const {
+    return state != 0 && (uint32_t)(millis() - last_byte_ms) <= 1000u;
+  }
+  bool expireIfStale() {
+    if (state != 0 && (uint32_t)(millis() - last_byte_ms) > 1000u) {
+      reset();
+      return true;
+    }
+    return false;
+  }
+  void onByte(uint8_t c) {
+    last_byte_ms = millis();
+    switch (state) {
+      case 0:
+        if (c == '<') state = 1;
+        break;
+      case 1:
+        frame_len = c;
+        state = 2;
+        break;
+      case 2:
+        frame_len |= (uint16_t)(((uint16_t)c) << 8);
+        rx_len = 0;
+        state = (frame_len > 0) ? 3 : 0;
+        break;
+      default:
+        rx_len++;
+        if (rx_len >= frame_len) state = 0;
+        break;
+    }
+  }
+};
+
+void testUsbCompanionSplitFrameGuard() {
+  UsbFrameTrackerModel tracker;
+  g_now_ms = 1000;
+  assert(!tracker.inProgress());
+
+  // 5-byte companion frame split across two USB packets: chunk 1 has '<', len=5, 2 payload bytes;
+  // chunk 2 starts with 'a' (which would otherwise look like a CLI command letter!).
+  const uint8_t chunk1[] = {'<', 0x05, 0x00, 0x02, 'x'};
+  for (uint8_t b : chunk1) tracker.onByte(b);
+  assert(tracker.inProgress());
+
+  g_now_ms = 1005;
+  const uint8_t chunk2[] = {'a', 'b', 'c'};
+  assert(tracker.inProgress());  // prevents MyMesh::loop() from routing 'a' to checkCLIRescueCmd
+  for (uint8_t b : chunk2) tracker.onByte(b);
+  assert(!tracker.inProgress()); // complete 5-byte frame resets tracker to IDLE
+
+  // Zero-length frame ('<', 0, 0) immediately returns to IDLE
+  tracker.onByte('<');
+  assert(tracker.inProgress());
+  tracker.onByte(0x00);
+  tracker.onByte(0x00);
+  assert(!tracker.inProgress());
+
+  // Stray '<' typed on console expires after >1000 ms so interactive CLI is never wedged
+  g_now_ms = 2000;
+  tracker.onByte('<');
+  assert(tracker.inProgress());
+  g_now_ms = 3001;
+  assert(!tracker.inProgress());
+  assert(tracker.expireIfStale());
+  assert(tracker.state == 0);
+}
+
 // ============================================================================
 // 4. ClockFloorRTC mesh-peer quorum & outgoing-message floor seeding
 //    + Repeater DM "ping" status request & PONG formatter
@@ -788,6 +862,8 @@ void testSourceContracts() {
   const std::string mymesh_cpp   = slurp("src/MyMesh.cpp");
   const std::string mqtt_h       = slurp("src/helpers/esp32/MqttBridge.h");
   const std::string mqtt_cpp     = slurp("src/helpers/esp32/MqttBridge.cpp");
+  const std::string mt_h         = slurp("src/helpers/esp32/MultiTransportCompanionInterface.h");
+  const std::string mt_cpp       = slurp("src/helpers/esp32/MultiTransportCompanionInterface.cpp");
   const std::string uitask_cpp   = slurp("src/ui-touch/UITask.cpp");
   const std::string wardrive     = slurp("deploy/apps/wardrive/1.3/wardrive.lua");
 
@@ -818,6 +894,10 @@ void testSourceContracts() {
   assert(mqtt_h.find("parseAuthenticatedRxDm") != std::string::npos);
   assert(mymesh_cpp.find("ensureRegionWithParents") != std::string::npos);
   assert(mymesh_cpp.find("kSeedRegions") == std::string::npos);
+  assert(mymesh_cpp.find("isReceivingUsbFrame") == std::string::npos);
+  assert(mymesh_cpp.find("MultiTransportCompanionInterface::isUsbFrameInProgress()") != std::string::npos);
+  assert(mt_h.find("static bool isUsbFrameInProgress();") != std::string::npos);
+  assert(mt_cpp.find("class UsbFrameTrackingStream : public Stream") != std::string::npos);
 
   // UITask.cpp contracts:
   assert(uitask_cpp.find("s_discover_tx_throttled") != std::string::npos);
@@ -837,6 +917,7 @@ int main() {
   testDiscoverUpsertAndControlRecv();
   testDualScopeFloodRetry();
   testSplitLineSerialCliAssembly();
+  testUsbCompanionSplitFrameGuard();
   testClockFloorAndMeshQuorum();
   testRepeaterDmPingAndPongFormat();
   testMqttOptInAuthAndOutgoingIdentity();

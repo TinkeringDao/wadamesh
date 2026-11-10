@@ -22,6 +22,111 @@ extern volatile bool g_usb_files_owns_serial;
 bool MultiTransportCompanionInterface::s_ble_rxlog_once = false;
 bool MultiTransportCompanionInterface::s_ble_rxlog_all  = false;   // #256: opt-in, per session
 
+namespace {
+
+// Mirrors ArduinoSerialInterface::checkRecvFrame's 4-state framing parser so
+// MyMesh::loop() knows when USB Serial is mid-companion-frame ('<' + 2-byte
+// little-endian length + payload) without modifying the external MeshCore
+// BaseSerialInterface / ArduinoSerialInterface headers.
+class UsbFrameTrackingStream : public Stream {
+public:
+  static const uint32_t kStaleFrameTimeoutMs = 1000u;
+
+  UsbFrameTrackingStream()
+    : _inner(nullptr), _state(0), _frame_len(0), _rx_len(0), _last_byte_ms(0) {}
+
+  void attach(Stream& inner) {
+    _inner = &inner;
+    reset();
+  }
+
+  void reset() {
+    _state = 0;
+    _frame_len = 0;
+    _rx_len = 0;
+    _last_byte_ms = 0;
+  }
+
+  bool inProgress() const {
+    if (_state == 0) return false;
+    return (uint32_t)(millis() - _last_byte_ms) <= kStaleFrameTimeoutMs;
+  }
+
+  bool expireIfStale() {
+    if (_state != 0 && (uint32_t)(millis() - _last_byte_ms) > kStaleFrameTimeoutMs) {
+      reset();
+      return true;
+    }
+    return false;
+  }
+
+  int available() override {
+    return _inner ? _inner->available() : 0;
+  }
+
+  int read() override {
+    if (!_inner) return -1;
+    int c = _inner->read();
+    if (c < 0) return c;
+    _last_byte_ms = millis();
+    switch (_state) {
+      case 0: // RECV_STATE_IDLE
+        if (c == '<') {
+          _state = 1;
+        }
+        break;
+      case 1: // RECV_STATE_HDR_FOUND
+        _frame_len = (uint8_t)c;
+        _state = 2;
+        break;
+      case 2: // RECV_STATE_LEN1_FOUND
+        _frame_len |= (uint16_t)(((uint16_t)(uint8_t)c) << 8);
+        _rx_len = 0;
+        _state = (_frame_len > 0) ? 3 : 0;
+        break;
+      default: // RECV_STATE_LEN2_FOUND
+        _rx_len++;
+        if (_rx_len >= _frame_len) {
+          _state = 0;
+        }
+        break;
+    }
+    return c;
+  }
+
+  int peek() override {
+    return _inner ? _inner->peek() : -1;
+  }
+
+  size_t write(uint8_t b) override {
+    return _inner ? _inner->write(b) : 0;
+  }
+
+  size_t write(const uint8_t* buffer, size_t size) override {
+    return _inner ? _inner->write(buffer, size) : 0;
+  }
+
+  void flush() override {
+    if (_inner) _inner->flush();
+  }
+
+private:
+  Stream*  _inner;
+  uint8_t  _state;
+  uint16_t _frame_len;
+  uint16_t _rx_len;
+  uint32_t _last_byte_ms;
+};
+
+UsbFrameTrackingStream s_usb_tracking_stream;
+
+} // namespace
+
+bool MultiTransportCompanionInterface::isUsbFrameInProgress() {
+  if (g_usb_files_owns_serial) return false;
+  return s_usb_tracking_stream.inProgress();
+}
+
 MultiTransportCompanionInterface::MultiTransportCompanionInterface()
   : _tcp_port(0), _ws_port(0), _tcp_started(false), _ws_started(false), _tcp_enabled(true), _isEnabled(false), _broadcast(false), _last_reply_target(REPLY_TARGET_USB), _ota_tcp_suspended(false), _ota_ws_suspended(false), _ota_ws_listen_paused(false)
 #ifdef BLE_PIN_CODE
@@ -37,7 +142,8 @@ MultiTransportCompanionInterface::MultiTransportCompanionInterface()
 }
 
 void MultiTransportCompanionInterface::begin(Stream& usb_serial, uint16_t tcp_port, uint16_t ws_port) {
-  _usb.begin(usb_serial);
+  s_usb_tracking_stream.attach(usb_serial);
+  _usb.begin(s_usb_tracking_stream);
   _tcp_port = tcp_port;
   _ws_port = ws_port;
   _last_reply_target = REPLY_TARGET_USB;
@@ -395,6 +501,7 @@ bool MultiTransportCompanionInterface::getBlePeerAddress(char* buf, size_t len) 
 
 void MultiTransportCompanionInterface::enable() {
   _isEnabled = true;
+  s_usb_tracking_stream.reset();
   _usb.enable();
   _last_reply_target = REPLY_TARGET_USB;
 #ifdef BLE_PIN_CODE
@@ -405,6 +512,7 @@ void MultiTransportCompanionInterface::enable() {
 
 void MultiTransportCompanionInterface::disable() {
   _isEnabled = false;
+  s_usb_tracking_stream.reset();
   _usb.disable();
 #ifdef BLE_PIN_CODE
   // A prior disableBle() may have fully deinitialised NimBLE and left the
@@ -551,6 +659,9 @@ size_t MultiTransportCompanionInterface::checkRecvFrame(uint8_t dest[]) {
 
   // Poll USB first (preserve Home Assistant / USB priority). Do not overwrite _last_reply_target
   // when caller is in the middle of a contact-list stream (handled by caller saving/restoring target).
+  if (!g_usb_files_owns_serial && s_usb_tracking_stream.expireIfStale()) {
+    _usb.enable();
+  }
   size_t len = g_usb_files_owns_serial ? 0 : _usb.checkRecvFrame(dest);
   if (len > 0) {
     _last_reply_target = REPLY_TARGET_USB;

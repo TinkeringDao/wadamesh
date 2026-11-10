@@ -6801,9 +6801,11 @@ void MyMesh::loop() {
     // printable, so we must not treat them as console or we break USB app connection.
 #if defined(ESP32)
     while (Serial.available() > 0) {
-      if (_serial && _serial->isReceivingUsbFrame()) {
+#if defined(MULTI_TRANSPORT_COMPANION)
+      if (MultiTransportCompanionInterface::isUsbFrameInProgress()) {
         break;
       }
+#endif
       if (cli_command[0] != '\0') {
         if (Serial.peek() == '<') {
           cli_command[0] = 0;
