@@ -34,7 +34,7 @@ jobs:
             echo "No changed files outside workflow definition."
             exit 0
           fi
-          FORBIDDEN_REGEX='(BEGIN (RSA|OPENSSH|EC|PGP) PRIVATE KEY|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|AKIA[0-9A-Z]{16}|/Users/[a-zA-Z0-9_-]+/)'
+          FORBIDDEN_REGEX='(BEGIN (RSA|OPENSSH|EC|PGP) PRIVATE KEY|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|AKIA[0-9A-Z]{16}|/Users/satori|hindsight|HINDSIGHT|192\.168\.10\.|100\.91\.|:9100|acid9burn|satori|munna|dachau|vierkirchen|85256|85221|48\.37|11\.50|elit3-x|elite-x|trackerIntake|aoagents)'
           for f in ${CHANGED_FILES}; do
             if [ -f "$f" ]; then
               if grep -nE "${FORBIDDEN_REGEX}" "$f"; then

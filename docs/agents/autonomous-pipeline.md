@@ -8,7 +8,7 @@ This document defines the end-to-end **6-Stage Autonomous Development, Review, R
 
 ```mermaid
 flowchart TD
-    S1["Stage 1: Context & Hindsight Recall"] --> S2["Stage 2: Branch Isolation & Signed TDD Implementation"]
+    S1["Stage 1: Repository Context & Spec Alignment"] --> S2["Stage 2: Branch Isolation & Signed TDD Implementation"]
     S2 --> S3["Stage 3: Pull Request Creation (Summary / Evidence / Merge Danger)"]
     S3 --> S4A["Stage 4A: GitHub Actions 4-Gate CI (.github/workflows/autonomous-pr-review.yml)"]
     S3 --> S4B["Stage 4B: Independent Agentic Spec, Code & Security Review"]
@@ -17,22 +17,17 @@ flowchart TD
     S5 -- "Yes" --> REM["Autonomous Remediation Loop (Signed Commit + Push)"]
     REM --> S4A
     REM --> S4B
-    S5 -- "No (Zero Unresolved Findings)" --> S6["Stage 6: Automated Bot Approval, Squash Merge & Hindsight Retention"]
+    S5 -- "No (Zero Unresolved Findings)" --> S6["Stage 6: Automated Bot Approval & Squash Merge"]
 ```
 
 ---
 
-## Stage 1: Context & Hindsight Recall
+## Stage 1: Repository Context & Spec Alignment
 
 Before modifying any source file, board variant (`variants/`), or build configuration (`platformio.ini`), the autonomous agent MUST:
 
-1. **Query Hindsight Semantic Memory**:
-   ```bash
-   curl -s -X POST http://192.168.10.238:9100/v1/default/banks/satori/memories/recall \
-     -H "Content-Type: application/json" \
-     -d '{"query": "wadamesh MeshCore LVGL touch firmware SX1262 LR1110 AXP2101 BQ25896 legal RF safety"}'
-   ```
-2. **Read Repository Governance & Domain Specifications**:
+
+1. **Read Repository Governance & Domain Specifications**:
    - [`AGENTS.md`](../../AGENTS.md) — Target board matrix, build commands, and RF/PMIC invariants.
    - [`LEGAL.md`](../../LEGAL.md) — 8-pillar legal compliance framework, EU RED / ETSI / FCC RF limits, and the German Statutory Addendum (`Addendum: German Statutory References`).
    - [`SECURITY.md`](../../SECURITY.md) — Coordinated vulnerability disclosure, cryptographic boundaries, and OPSEC rules.
@@ -105,7 +100,7 @@ If either the Reviewer Subagent (Stage 4B) or the automated CI workflow (Stage 4
 
 ---
 
-## Stage 6: Automated Approval, Squash Merge & Hindsight Retention
+## Stage 6: Automated Approval & Squash Merge
 
 1. **Automated Bot Approval**:
    - Once all 4 CI gates succeed on the latest commit and `HEAD_REPO == BASE_REPO && PR_AUTHOR == 'TinkeringDao'`, `.github/workflows/autonomous-pr-review.yml` executes `gh pr review "${PR_NUMBER}" --approve` as `github-actions[bot]`.
@@ -114,11 +109,4 @@ If either the Reviewer Subagent (Stage 4B) or the automated CI workflow (Stage 4
    - The approved PR is merged into `main` via:
      ```bash
      gh pr merge <PR_NUMBER> --squash --delete-branch
-     ```
-3. **Hindsight Knowledge Retention**:
-   - Post-merge architectural decisions, resolved review findings, and commit SHAs are persisted to Hindsight:
-     ```bash
-     curl -s -X POST http://192.168.10.238:9100/v1/default/banks/satori/memories \
-       -H "Content-Type: application/json" \
-       -d '{"items": [{"content": "Merged PR #<N> in TinkeringDao/wadamesh: <summary>"}]}'
      ```
