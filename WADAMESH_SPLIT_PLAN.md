@@ -115,5 +115,5 @@ cadence is unaffected.
 - **`ESP32Board` split** is the biggest judgment call — review before moving.
 - **"Both cores"** validation (building wadamesh on `kkazakov/meshcomod`) is
   deferred until step 3 proves the boundary.
-- **Security gate every wadamesh push** — no `CLAUDE.md`, no `.claude/`, no infra
+- **Security gate every wadamesh push** — no local tool configs, no `.claude/`, no infra
   details.

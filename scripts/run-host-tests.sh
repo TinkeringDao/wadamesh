@@ -85,7 +85,8 @@ skip_reason() {
 }
 
 pass=0; fail=0; skip=0; failed=""
-for t in test/test_*.cpp; do
+shopt -s nullglob
+for t in test/host_*.cpp test/test_*.cpp; do
   n="$(basename "$t" .cpp)"
   reason="$(skip_reason "$n")"
   if [ -n "$reason" ]; then

@@ -8,12 +8,19 @@
 <p align="center"><b>A real touchscreen UI for your mesh radio.</b> &middot; open source &middot; GPL-3.0</p>
 
 Touch-UI [MeshCore](https://github.com/meshcore-dev/MeshCore) companion-radio
-firmware for the **LilyGo T-Deck / T-Deck Plus**, **Heltec V4 + TFT** and other boards
-(ESP32-S3).
+firmware for the **LilyGo T-Deck / T-Deck Plus**, **Heltec V4 + TFT**, **Elecrow ThinkNode M9**, and other boards.
 
 An LVGL touch UI (map, chat, contacts, channels, settings) split out of
 [meshcomod](https://github.com/ALLFATHER-BV/meshcomod). The app depends on a
 MeshCore fork via PlatformIO `lib_deps`.
+
+## What This Fork Adds
+
+This fork of [ALLFATHER-BV/wadamesh](https://github.com/ALLFATHER-BV/wadamesh) tracks hardware bring-up and radio/UI patches tested on daily-carried handhelds:
+
+- Elecrow ThinkNode M9 (`nRF52840` + `LR1110`) port: board initialization, `GPIO1`/`GPIO8` charger sense, 20 MHz SPI microSD, IMU/compass wiring, and LR1110 radio wrapper, merged upstream in [ALLFATHER-BV/wadamesh#826](https://github.com/ALLFATHER-BV/wadamesh/pull/826) (`beta_103`), plus battery sag hysteresis (`#7`) so `+22 dBm` TX IR drop across the 20 s UI publish hold does not false-trigger the 3% low-battery shutoff.
+- Dual-mesh `CrossMesh` app (`#9`) bridging MeshCore and on-air Meshtastic `LongFast` AES-CTR/Protobuf frames (`src/helpers/MeshtasticWire.*`), repeater DM ping/CLI reply routing and 2-peer clock quorum (`#6`), and 4-step LVGL battery fill glyphs with green/orange/red charge bands (`#8`).
+- Limitations: single-radio CrossMesh time-slicing listens on one LoRa modulation profile at a time, so frames transmitted on the inactive profile during a dwell window are missed; regional sub-GHz duty-cycle limits apply across the combined airtime of both protocols.
 
 ## Boards
 
@@ -147,3 +154,6 @@ full list and their licenses. MeshCore-derived files keep their MIT notices; the
 combined work is distributed under the GPL (MIT is GPL-compatible). The MeshCore
 fork that wadamesh builds against stays **MIT** on purpose, so its Wi-Fi/BLE hooks
 remain upstreamable to MeshCore.
+
+Independent, non-commercial open-source fork; hardware names identify compatible target boards only.
+Operators are responsible for local sub-GHz/2.4 GHz spectrum compliance and battery safety (see [LEGAL.md](LEGAL.md) and [SECURITY.md](SECURITY.md)).

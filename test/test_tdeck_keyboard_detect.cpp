@@ -9,6 +9,7 @@
 //       && /tmp/test_tdeck_keyboard_detect
 #include <cassert>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include "Arduino.h"
 #include "Wire.h"

@@ -4,6 +4,7 @@
 #include "M9Compass.h"
 #include <Arduino.h>
 #include <Wire.h>
+#include <math.h>
 
 // Bring-up aid: log the raw field vector once a second so the sensor's axis
 // orientation on this board can be derived from readings at known headings
