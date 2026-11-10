@@ -2980,12 +2980,33 @@ void MyMesh::onContactsFull() {
   }
 }
 
+#if defined(ESP32)
+static uint32_t peerClockQuorumIdFromPubKey(const uint8_t pk[PUB_KEY_SIZE]) {
+  uint32_t id = 0;
+  if (pk) memcpy(&id, pk, sizeof(id));
+  return id == 0 ? 1u : id;
+}
+
+static uint32_t peerClockQuorumIdFromChannelText(const char* text) {
+  if (!text) return 0;
+  const char* colon = strchr(text, ':');
+  if (!colon || colon == text || (colon - text) > 48) return 0;
+  uint32_t h = 2166136261u;
+  for (const char* p = text; p < colon; ++p) {
+    h ^= (uint8_t)(*p);
+    h *= 16777619u;
+  }
+  return h == 0 ? 1u : h;
+}
+#endif
+
 void MyMesh::onDiscoveredContact(ContactInfo &contact, bool is_new, uint8_t path_len, const uint8_t* path) {
   // Bootstrap an unsynced clock (Seed or Floor after power loss) from an Ed25519-verified
   // advertisement timestamp via adoptMeshPeerTime (2-peer quorum for large jumps, keeps
   // _source == Floor so a stale peer heard first cannot lock out real-time peers).
 #if defined(ESP32)
-  rtc_clock.adoptMeshPeerTime(contact.last_advert_timestamp);
+  rtc_clock.adoptMeshPeerTime(contact.last_advert_timestamp,
+                              peerClockQuorumIdFromPubKey(contact.id.pub_key));
 #else
   if (contact.last_advert_timestamp > 1772323200UL && contact.last_advert_timestamp < 2000000000UL &&
       getRTCClock()->getCurrentTime() <= 1772323200UL) {
@@ -3244,7 +3265,7 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   // and GPS off, or not yet synced). Uses adoptMeshPeerTime so a stale peer does not
   // promote _source to ExternalSync and lock out real-time peers.
 #if defined(ESP32)
-  rtc_clock.adoptMeshPeerTime(sender_timestamp);
+  rtc_clock.adoptMeshPeerTime(sender_timestamp, peerClockQuorumIdFromPubKey(from.id.pub_key));
 #else
   if (sender_timestamp > 1772323200UL && sender_timestamp < 2000000000UL &&
       getRTCClock()->getCurrentTime() <= 1772323200UL) {
@@ -3425,13 +3446,6 @@ void MyMesh::onMqttDirectMessageRecv(const uint8_t* sender_prefix6, const char* 
   if (memcmp(sender_prefix6, self_id.pub_key, 6) == 0) return;
   ContactInfo* from = lookupContactByPubKey(sender_prefix6, 6);
   if (!from) return;
-  for (int i = 0; i < EXPECTED_ACK_TABLE_SIZE; i++) {
-    if (expected_ack_table[i].ack != 0 && expected_ack_table[i].contact == from) {
-      uint32_t ack_val = expected_ack_table[i].ack;
-      processAck(reinterpret_cast<const uint8_t*>(&ack_val));
-      break;
-    }
-  }
   markConnectionActive(*from);
   mesh::Packet pkt{};
   pkt.header = PAYLOAD_TYPE_TXT_MSG;
@@ -3505,7 +3519,7 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
                                   const char *text) {
   // Clock bootstrap from a channel peer's send-time via adoptMeshPeerTime.
 #if defined(ESP32)
-  rtc_clock.adoptMeshPeerTime(timestamp);
+  rtc_clock.adoptMeshPeerTime(timestamp, peerClockQuorumIdFromChannelText(text));
 #else
   if (timestamp > 1772323200UL && timestamp < 2000000000UL &&
       getRTCClock()->getCurrentTime() <= 1772323200UL) {

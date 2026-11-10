@@ -141,14 +141,18 @@ int main() {
     r.clk.seedSystemClock();
     assert(!r.clk.timeIsCurrent());
     // Small advance (+5 min) accepted immediately, stays Floor (!timeIsCurrent()), 0 hw writes
-    assert(r.clk.adoptMeshPeerTime(NOW + 300));
+    assert(r.clk.adoptMeshPeerTime(NOW + 300, 0xAAAA0001u));
     assert(r.clk.getFloor() == NOW + 300 && !r.clk.timeIsCurrent() && r.hw().writes == 0);
-    // Single rogue repeater +2 days in the future is held for quorum
-    assert(!r.clk.adoptMeshPeerTime(NOW + 172800));
+    // Single rogue repeater +2 days in the future is held for quorum — even if it repeats!
+    assert(!r.clk.adoptMeshPeerTime(NOW + 172800, 0xBAD0BEEFu));
+    assert(!r.clk.adoptMeshPeerTime(NOW + 172860, 0xBAD0BEEFu));
     assert(r.clk.getFloor() == NOW + 300);
-    // Two real-time peers +6h ahead (within 15 min of each other) complete quorum
-    assert(!r.clk.adoptMeshPeerTime(NOW + 21600));
-    assert(r.clk.adoptMeshPeerTime(NOW + 21620));
+    // Unidentified sender (peer_id == 0) cannot seed or corroborate a large jump
+    assert(!r.clk.adoptMeshPeerTime(NOW + 21600, 0));
+    assert(r.clk.getFloor() == NOW + 300);
+    // Two distinct real-time peers +6h ahead (within 15 min of each other) complete quorum
+    assert(!r.clk.adoptMeshPeerTime(NOW + 21600, 0x11111111u));
+    assert(r.clk.adoptMeshPeerTime(NOW + 21620, 0x22222222u));
     assert(r.clk.getFloor() == NOW + 21620 && !r.clk.timeIsCurrent() && r.hw().writes == 0);
   }
 

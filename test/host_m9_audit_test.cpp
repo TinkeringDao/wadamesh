@@ -545,6 +545,7 @@ struct MockClockFloorRTC {
 
   uint32_t    _floor           = MIN_VALID_EPOCH;
   uint32_t    _pending_peer_ts = 0;
+  uint32_t    _pending_peer_id = 0;
   ClockSource _source          = ClockSource::Seed;
 
   bool timeIsCurrent() const { return _source >= ClockSource::HardwareRTC; }
@@ -564,7 +565,7 @@ struct MockClockFloorRTC {
     _source = ClockSource::ExternalSync;
   }
 
-  bool adoptMeshPeerTime(uint32_t peer_ts) {
+  bool adoptMeshPeerTime(uint32_t peer_ts, uint32_t peer_id = 0) {
     if (timeIsCurrent()) return false;
     if (peer_ts <= MIN_VALID_EPOCH || peer_ts > MAX_PLAUSIBLE_EPOCH) return false;
     const uint32_t cur = getCurrentTime();
@@ -574,18 +575,21 @@ struct MockClockFloorRTC {
                             (cur <= MIN_VALID_EPOCH) ||
                             (peer_ts > cur + MAX_SINGLE_PEER_JUMP_SECS);
     if (large_jump) {
-      if (_pending_peer_ts != 0) {
+      if (peer_id == 0) return false;
+      if (_pending_peer_ts != 0 && _pending_peer_id != 0 && peer_id != _pending_peer_id) {
         const uint32_t diff = (peer_ts >= _pending_peer_ts)
                                   ? (peer_ts - _pending_peer_ts)
                                   : (_pending_peer_ts - peer_ts);
         if (diff <= PEER_QUORUM_TOLERANCE_SECS) {
           _pending_peer_ts = 0;
+          _pending_peer_id = 0;
           _floor = peer_ts;
           _source = ClockSource::Floor;
           return true;
         }
       }
       _pending_peer_ts = peer_ts;
+      _pending_peer_id = peer_id;
       return false;
     }
 
@@ -629,14 +633,17 @@ void testClockFloorAndMeshQuorum() {
   assert(!rtc.timeIsCurrent());
 
   // 4) Single rogue repeater advert 2.3 days in the future (rogue future peer B
-  //    2026-11-13 = 1794524432) is held for quorum and does NOT jump the floor.
-  assert(!rtc.adoptMeshPeerTime(1794524432UL));
+  //    2026-11-13 = 1794524432) is held for quorum — even if it broadcasts twice —
+  //    and does NOT jump the floor.
+  assert(!rtc.adoptMeshPeerTime(1794524432UL, 0xBAD0BEEFu));
+  assert(!rtc.adoptMeshPeerTime(1794524490UL, 0xBAD0BEEFu));
   assert(rtc.getCurrentTime() == 1794299100UL);
 
-  // 5) Real-time peers at 15:08 (1794319680 and 1794319694, within 14s of each other)
+  // 5) Distinct real-time peers at 15:08 (1794319680 and 1794319694, within 14s)
   //    corroborate each other and advance the clock to 15:08:14!
-  assert(!rtc.adoptMeshPeerTime(1794319680UL)); // first 15:08 peer replaces rogue pending
-  assert(rtc.adoptMeshPeerTime(1794319694UL));  // second 15:08 peer completes quorum!
+  assert(!rtc.adoptMeshPeerTime(1794319680UL, 0x11111111u)); // first 15:08 peer replaces rogue pending
+  assert(!rtc.adoptMeshPeerTime(1794319685UL, 0x11111111u)); // same peer again still cannot self-corroborate
+  assert(rtc.adoptMeshPeerTime(1794319694UL, 0x22222222u));  // second distinct 15:08 peer completes quorum!
   assert(rtc.getCurrentTime() == 1794319694UL);
   assert(!rtc.timeIsCurrent()); // still Floor until GPS/NTP calls setCurrentTime()
 
@@ -869,6 +876,7 @@ void testSourceContracts() {
 
   // ClockFloorRTC contracts:
   assert(clock_h.find("adoptMeshPeerTime") != std::string::npos);
+  assert(clock_h.find("_pending_peer_id") != std::string::npos);
   assert(clock_h.find("MAX_SINGLE_PEER_JUMP_SECS") != std::string::npos);
   assert(clock_h.find("PEER_QUORUM_TOLERANCE_SECS") != std::string::npos);
 

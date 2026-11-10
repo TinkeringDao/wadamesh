@@ -49,6 +49,7 @@ public:
 private:
   uint32_t    _floor = 0;
   uint32_t    _pending_peer_ts = 0;
+  uint32_t    _pending_peer_id = 0;
   ClockSource _source = ClockSource::Seed;
   bool        _hw_present = false;
 
@@ -208,9 +209,9 @@ public:
   //      unverified peer time to the hardware RTC), so a stale peer heard first
   //      cannot lock out newer real-time peers.
   //   2. Any jump of >1 hour (or the first jump off Seed) requires a 2-peer quorum
-  //      within +/-15 minutes, preventing a single rogue repeater days in the future
-  //      from poisoning the monotonic floor.
-  bool adoptMeshPeerTime(uint32_t peer_ts) {
+  //      from two distinct peer_ids within +/-15 minutes, preventing a single rogue
+  //      repeater days in the future from poisoning the monotonic floor.
+  bool adoptMeshPeerTime(uint32_t peer_ts, uint32_t peer_id = 0) {
     if (timeIsCurrent()) return false;
     if (peer_ts <= MIN_VALID_EPOCH || peer_ts > MAX_PLAUSIBLE_EPOCH) return false;
     const uint32_t cur = getCurrentTime();
@@ -220,12 +221,14 @@ public:
                             (cur <= MIN_VALID_EPOCH) ||
                             (peer_ts > cur + MAX_SINGLE_PEER_JUMP_SECS);
     if (large_jump) {
-      if (_pending_peer_ts != 0) {
+      if (peer_id == 0) return false;
+      if (_pending_peer_ts != 0 && _pending_peer_id != 0 && peer_id != _pending_peer_id) {
         const uint32_t diff = (peer_ts >= _pending_peer_ts)
                                   ? (peer_ts - _pending_peer_ts)
                                   : (_pending_peer_ts - peer_ts);
         if (diff <= PEER_QUORUM_TOLERANCE_SECS) {
           _pending_peer_ts = 0;
+          _pending_peer_id = 0;
           _floor = peer_ts;
           _source = ClockSource::Floor;
           pushSystemClock(peer_ts);
@@ -233,6 +236,7 @@ public:
         }
       }
       _pending_peer_ts = peer_ts;
+      _pending_peer_id = peer_id;
       return false;
     }
 

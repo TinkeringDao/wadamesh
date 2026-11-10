@@ -82946,12 +82946,15 @@ void UITask::loop() {
     snprintf(msg, sizeof(msg), TR("No reply from %s"), s_ui_ping_target_name);
     showAlert(msg, 3500);
   }
-  if ((s_trace_ping_pending || s_trace_route_pending) && s_trace_sent_ms != 0 &&
-      (uint32_t)(millis() - s_trace_sent_ms) > 8000u) {
-    s_trace_ping_pending  = false;
-    s_trace_route_pending = false;
-    s_trace_sent_ms       = 0;
-    showAlert(TR("No trace reply (node out of direct/known path)"), 2500);
+  if ((s_trace_ping_pending || s_trace_route_pending) && s_trace_sent_ms != 0) {
+    const uint32_t trace_timeout_ms = s_trace_route_pending ? 20000u : 8000u;
+    if ((uint32_t)(millis() - s_trace_sent_ms) > trace_timeout_ms) {
+      // Keep s_trace_route_pending latched until onTracePingResult or the next
+      // trace so a slow multi-hop LoRa reply still opens the per-hop popup.
+      s_trace_ping_pending = false;
+      s_trace_sent_ms      = 0;
+      showAlert(TR("No trace reply (node out of direct/known path)"), 2500);
+    }
   }
 #if defined(HELTEC_V4_EXPANSION_IO_PIN) && !defined(HELTEC_LORA_V4_R8)
   // Original V4 Expansion Kit SW3 "IO" (GPIO35, active-low). Debounce before
