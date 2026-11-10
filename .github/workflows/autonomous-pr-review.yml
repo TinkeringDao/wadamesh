@@ -25,6 +25,7 @@ jobs:
       - name: Gate 1 — OPSEC & Zero-PII Scan on Changed Files
         env:
           BASE_REF: ${{ github.base_ref }}
+          OPSEC_BLOCKLIST_REGEX: ${{ secrets.OPSEC_BLOCKLIST_REGEX }}
         run: |
           set -euo pipefail
           echo "=== Gate 1: OPSEC & Zero-PII Scan ==="
@@ -34,15 +35,24 @@ jobs:
             echo "No changed files outside workflow definition."
             exit 0
           fi
-          FORBIDDEN_REGEX='(BEGIN (RSA|OPENSSH|EC|PGP) PRIVATE KEY|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|AKIA[0-9A-Z]{16}|/Users/satori|hindsight|HINDSIGHT|192\.168\.10\.|100\.91\.|:9100|acid9burn|satori|munna|dachau|vierkirchen|85256|85221|48\.37|11\.50|elit3-x|elite-x|trackerIntake|aoagents)'
-          for f in ${CHANGED_FILES}; do
+          FORBIDDEN_REGEX='(BEGIN (RSA|OPENSSH|EC|PGP) PRIVATE KEY|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|AKIA[0-9A-Z]{16}|/Users/[a-zA-Z0-9._-]+/)'
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
             if [ -f "$f" ]; then
-              if grep -nE "${FORBIDDEN_REGEX}" "$f"; then
-                echo "::error file=$f::OPSEC/Zero-PII violation detected in $f"
+              MATCH_LINES=$( { grep -nI -E -- "${FORBIDDEN_REGEX}" "$f" || true; } | cut -d: -f1 )
+              if [ -n "${MATCH_LINES}" ]; then
+                echo "::error file=$f::OPSEC/Zero-PII generic pattern violation in $f (lines: ${MATCH_LINES//$'\n'/,})"
                 exit 1
               fi
+              if [ -n "${OPSEC_BLOCKLIST_REGEX:-}" ]; then
+                BL_LINES=$( { grep -nI -iE -- "${OPSEC_BLOCKLIST_REGEX}" "$f" || true; } | cut -d: -f1 )
+                if [ -n "${BL_LINES}" ]; then
+                  echo "::error file=$f::OPSEC blocklist violation in $f (lines: ${BL_LINES//$'\n'/,})"
+                  exit 1
+                fi
+              fi
             fi
-          done
+          done <<< "${CHANGED_FILES}"
           echo "Gate 1 passed: Zero PII or secret patterns found in changed files."
 
       - name: Gate 2 — SSH Commit Signature & Author Verification
