@@ -132,6 +132,26 @@ int main() {
   // a poisoned persisted floor is refused
   { Rig r; r.clk.seedFloor(FUTURE_2043); assert(r.clk.getFloor() == 0); }
 
+  // adoptMeshPeerTime: 2-peer quorum for >1h jumps, keeps !timeIsCurrent() (Floor)
+  // so a stale peer heard first cannot lock out real-time peers, and never writes
+  // unverified mesh time to the hardware RTC.
+  {
+    Rig r; r.hw().hw = MIN; g_sys = MIN; g_sys_sets = 0;
+    r.clk.seedFloor(NOW);
+    r.clk.seedSystemClock();
+    assert(!r.clk.timeIsCurrent());
+    // Small advance (+5 min) accepted immediately, stays Floor (!timeIsCurrent()), 0 hw writes
+    assert(r.clk.adoptMeshPeerTime(NOW + 300));
+    assert(r.clk.getFloor() == NOW + 300 && !r.clk.timeIsCurrent() && r.hw().writes == 0);
+    // Single rogue repeater +2 days in the future is held for quorum
+    assert(!r.clk.adoptMeshPeerTime(NOW + 172800));
+    assert(r.clk.getFloor() == NOW + 300);
+    // Two real-time peers +6h ahead (within 15 min of each other) complete quorum
+    assert(!r.clk.adoptMeshPeerTime(NOW + 21600));
+    assert(r.clk.adoptMeshPeerTime(NOW + 21620));
+    assert(r.clk.getFloor() == NOW + 21620 && !r.clk.timeIsCurrent() && r.hw().writes == 0);
+  }
+
   printf("test_clock_floor: ok\n");
   return 0;
 }

@@ -252,6 +252,29 @@ bool DataStore::removeFile(FILESYSTEM* fs, const char* filename) {
 }
 
 #if defined(ESP32)
+FILESYSTEM* DataStore::getSdFS() const {
+#if defined(HAS_TANMATSU) || defined(HAS_TDISPLAY_P4) || defined(HAS_CROWPANEL_P4_101) || defined(HAS_WIO_TRACKER_L2)
+  if (_fs == &SD_MMC || _fsExtra == &SD_MMC || SD_MMC.cardType() != CARD_NONE) return &SD_MMC;
+#endif
+#if !defined(HAS_WIO_TRACKER_L2)
+  if (_fs == &SD || _fsExtra == &SD || SD.cardType() != CARD_NONE) return &SD;
+#endif
+  return nullptr;
+}
+
+File DataStore::openSdRead(const char* path) {
+  FILESYSTEM* sdfs = getSdFS();
+  if (!sdfs) return File();
+  const char* p = (path && path[0]) ? path : "/";
+  return sdfs->open(p, "r", false);
+}
+
+bool DataStore::removeSdFile(const char* path) {
+  FILESYSTEM* sdfs = getSdFS();
+  if (!sdfs || !path || !path[0] || strcmp(path, "/") == 0) return false;
+  return sdfs->remove(path);
+}
+
 File DataStore::openAppend(FILESYSTEM* fs, const char* filename) {
   return fs->open(_rp(filename), "a", true);
 }

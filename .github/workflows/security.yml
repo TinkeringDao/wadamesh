@@ -48,7 +48,7 @@ jobs:
           set -euo pipefail
 
           # 1. Reject PEM / PKCS#8 / OpenSSH / PGP private key headers in tracked text files
-          if git grep -nI -E '-----BEGIN (RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----' -- \
+          if git grep -nI -E -e '-----BEGIN (RSA |DSA |EC |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----' -- \
             ':(exclude)third_party/**' ':(exclude)*.png' ':(exclude)*.jpg' ':(exclude)*.pdf'; then
             echo "ERROR: Private key header detected in tracked files." >&2
             exit 1
@@ -71,12 +71,13 @@ jobs:
             exit 1
           fi
           if [[ -n "$OPSEC_BLOCKLIST_REGEX" ]]; then
-            MATCH_LOCATIONS="$(grep -rnI -iE -- "$OPSEC_BLOCKLIST_REGEX" . \
+            MATCH_LOCATIONS="$(grep -rnI -iE \
               --exclude-dir=.git --exclude-dir=third_party \
               --exclude='*.hex' --exclude='*.uf2' --exclude='*.bin' --exclude='*.elf' \
               --exclude='*.so' --exclude='*.apk' --exclude='*.aab' --exclude='*.png' \
               --exclude='*.jpg' --exclude='*.jpeg' --exclude='*.pdf' --exclude='*.zip' \
-              --exclude='*.gz' --exclude='*.tar' | cut -d: -f1,2 || true)"
+              --exclude='*.gz' --exclude='*.tar' \
+              -- "$OPSEC_BLOCKLIST_REGEX" . | cut -d: -f1,2 || true)"
             if [[ -n "$MATCH_LOCATIONS" ]]; then
               printf 'ERROR: Restricted identifier detected at:\n%s\n' "$MATCH_LOCATIONS" >&2
               exit 1

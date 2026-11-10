@@ -53,6 +53,7 @@ local phase, phase_at = "idle", 0
 local function harvest_fresh(now) return (now - phase_at) <= STALE_MS end
 local hdr, gps_lbl, stat_lbl, rows = nil, nil, nil, {}
 local nodes = {}              -- pubkey -> { name, type, best, worst, seen }
+local last_harvested_ms = {}  -- pubkey -> timestamp (ms) of last harvested reply
 local pending = {}            -- lines waiting on the 1 write/sec limit
 
 -- ---- review state -----------------------------------------------------------
@@ -164,11 +165,18 @@ local function harvest()
     -- No fix means the sample cannot be placed, so it is discarded rather than
     -- logged at 0,0. A survey file with phantom points at Null Island is worse
     -- than a shorter one.
-    mesh.discover_clear()
     return
   end
-  for _, hit in ipairs(mesh.discovered()) do record(fix, hit) end
-  mesh.discover_clear()                     -- next sample must not inherit this one
+  local now = sys.millis()
+  for _, hit in ipairs(mesh.discovered()) do
+    local age_ms = hit.age_ms or hit.last_ms_ago or 0
+    local hit_ms = now - age_ms
+    if age_ms <= (HARVEST_MS + 2000) and
+       (not last_harvested_ms[hit.pubkey] or hit_ms > last_harvested_ms[hit.pubkey] + 500) then
+      last_harvested_ms[hit.pubkey] = hit_ms
+      record(fix, hit)
+    end
+  end
 end
 
 local function redraw()
@@ -581,7 +589,6 @@ local function enter_review()
     harvest()
   else
     if phase == "probe" then dropped_sweeps = dropped_sweeps + 1 end
-    mesh.discover_clear()
   end
   flush()                       -- and land them, so the reader below sees this run complete
   was_running = running
@@ -597,7 +604,6 @@ local function leave_review()
   view = "survey"
   running = was_running
   if running then phase, phase_at = "idle", 0 end
-  mesh.discover_clear()         -- same reason on the way back in
   ld = nil
   build_survey()
 end
@@ -691,6 +697,7 @@ build_survey = function()
   end)
   ui.button(tr("Reset"), 12 + bw * 2, y, bw, 32, function()
     nodes, samples, sweeps, pending, node_count = {}, 0, 0, {}, 0
+    last_harvested_ms = {}
     dropped_sweeps = 0
     mesh.discover_clear()
     fs.remove(logname())
@@ -756,7 +763,6 @@ function app.on_tick()
       if harvest_fresh(now) then
         harvest()
       else
-        mesh.discover_clear()
         dropped_sweeps = dropped_sweeps + 1
       end
       phase = "wait"          -- phase_at stays at the probe time, so sweeps stay on cadence

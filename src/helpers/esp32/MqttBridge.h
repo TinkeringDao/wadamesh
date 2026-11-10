@@ -40,7 +40,8 @@ class MqttBridge {
 public:
     void begin(const char* /*nodeHex*/) {}
     void loop() {}
-    void publishDM(const char*, const uint8_t*, float, uint8_t, uint32_t, const char*) {}
+    void publishDM(const char*, const uint8_t*, float, uint8_t, uint32_t, const char*,
+                   const char* = "rx", const char* = nullptr, const uint8_t* = nullptr) {}
     void publishChannel(int, const char*, float, uint8_t, uint32_t, const char*) {}
     bool enabled() const { return false; }
     void getStatus(MqttBridgeStatus& out) const { out = MqttBridgeStatus{}; }
@@ -98,7 +99,9 @@ public:
     void loop();
 
     void publishDM(const char* senderName, const uint8_t* senderKey32,
-                   float snr, uint8_t hops, uint32_t ts, const char* text);
+                   float snr, uint8_t hops, uint32_t ts, const char* text,
+                   const char* dir = "rx", const char* recipientName = nullptr,
+                   const uint8_t* recipientKey32 = nullptr);
     void publishChannel(int channelIdx, const char* channelName,
                         float snr, uint8_t hops, uint32_t ts, const char* text);
 
@@ -123,7 +126,7 @@ private:
     char     _host[64]    = {};
     char     _user[32]    = {};
     char     _pwd[32]     = {};
-    char     _psk[33]     = {};    // passphrase; empty = no payload encryption
+    char     _psk[65]     = {};    // passphrase; empty = no payload encryption
     uint8_t  _key[32]     = {};    // SHA-256(psk), valid when _encOn
     bool     _encOn       = false;
     uint16_t _port        = 1883;
@@ -145,6 +148,10 @@ private:
     static void reconnectTask(void* arg);   // one-shot task body wrapping reconnect()
     void pub(const char* subtopic, const char* json);  // seals if _encOn
     bool sealToB64(const char* plain, char* out, size_t outCap);
+    static bool parseAuthenticatedRxDm(const char* plain, size_t len,
+                                       uint8_t outSenderPrefix[6], const char** outText);
+    void onRxPacket(const char* topic, const uint8_t* payload, unsigned int length);
+    static void mqttCallback(char* topic, uint8_t* payload, unsigned int length);
     static void escapeJson(const char* src, char* dst, size_t dstLen);
 };
 #endif // HAS_TANMATSU (no-op stub) vs real MqttBridge
