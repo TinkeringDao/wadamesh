@@ -116,7 +116,11 @@ end
 
 -- wada.ui.list: rows with optional callbacks, same argument checks as uiList/lsAdd
 local lists = {}
-local map_obj, map_centers = nil, {}
+local map_obj, map_centers, map_markers, map_lines = nil, {}, {}, {}
+local mt_state = { active = false, dual_watch = true, on_meshtastic = true, preset = 0, freq = 869.525, bw = 250.0, sf = 11, cr = 5, self_id = 0x11223344, self_hex = "11223344", rx_count = 0, tx_count = 0, duty_used_ms = 0, duty_remaining_ms = 360000, last_rssi = -78, last_snr = 7.5 }
+local mt_rx_queue = {}
+local mt_tx_log = {}
+local widget_snap = nil
 local function mklist(x, y, w, h)
   checkint(x, "list x"); checkint(y, "list y"); checkint(w, "list w"); checkint(h, "list h")
   assert(w > 0 and h > 0, "list: width and height must be positive")
@@ -263,10 +267,18 @@ local function sd_exists(path) return sd_node(path) ~= nil end
 
 local function build_wada()
   local wada = { ui = {}, sys = {}, mesh = {}, store = {}, timer = {}, net = {}, fs = {} }
-  wada.ui.colors = { accent = 0x15B6A6, text = 0xE6E9ED, sub = 0x7A7F87, bg = 0x000000, panel = 0x15181B, bad = 0xD7574E, good = 0x53C06B }
+  wada.ui.colors = { accent = 0x15B6A6, text = 0xE6E9ED, sub = 0x7A7F87, bg = 0x000000, panel = 0x15181B, bad = 0xD7574E, good = 0x53C06B, warn = 0xE8A33D, border = 0x262B30 }
   wada.ui.canvas = mkcanvas
   wada.ui.label = mklabel
   wada.ui.button = mkbutton
+  wada.ui.panel = function(x, y, w, h, col, r)
+    checkint(x, "panel x"); checkint(y, "panel y"); checkint(w, "panel w"); checkint(h, "panel h")
+    checkcol(col, "panel")
+    local p = { x = x, y = y, w = w, h = h }
+    function p:pos(px, py) checkint(px, "panel:pos"); checkint(py, "panel:pos"); p.x, p.y = px, py end
+    function p:color(c) checkcol(c, "panel:color") end
+    return p
+  end
   wada.ui.scroll = function(on) widgets.scroll = (on == nil) or on end
   wada.ui.text_h = function(sz) return (sz or 12) + 4 end
   -- upstream's exact measurement: ~0.48 of the line height per character
@@ -492,9 +504,13 @@ local function build_wada()
         map_centers[#map_centers + 1] = { lat = lat, lon = lon, z = self._zoom }
       end
       function m:zoom(z) if z then self._zoom = z else return self._zoom end end
-      function m:marker(lat, lon, col, sz) end
-      function m:line(la1, lo1, la2, lo2, col, w) end
-      function m:clear() end
+      function m:marker(lat, lon, col, sz)
+        map_markers[#map_markers + 1] = { lat = lat, lon = lon, col = col, sz = sz or 9 }
+      end
+      function m:line(la1, lo1, la2, lo2, col, w)
+        map_lines[#map_lines + 1] = { la1 = la1, lo1 = lo1, la2 = la2, lo2 = lo2, col = col, w = w or 2 }
+      end
+      function m:clear() map_markers = {}; map_lines = {} end
       function m:tiles() return cfg.map_tiles or 0 end
       function m:redraw() end
       function m:to_screen(lat, lon) return math.floor(mw / 2), math.floor(mh / 2) end
@@ -504,7 +520,81 @@ local function build_wada()
       return m
     end
     wada.map = { view = mkmap }
+    wada.widget = {
+      set = function(t) assert(type(t) == "table", "widget.set table"); widget_snap = t; return true end,
+      clear = function() widget_snap = nil end,
+    }
   end
+  local function mt_parse_id(v, def_hex)
+    if v == nil then return def_hex or "ffffffff" end
+    if type(v) == "string" then
+      local s = v:gsub("^!", ""):lower()
+      return string.format("%08x", tonumber(s, 16) or 0)
+    end
+    return string.format("%08x", (math.tointeger(v) or 0) & 0xFFFFFFFF)
+  end
+  wada.meshtastic = {
+    PRESET_LONG_FAST = 0,
+    PRESET_LONG_MODERATE = 1,
+    PRESET_MEDIUM_FAST = 2,
+    PRESET_SHORT_FAST = 3,
+    start = function(a, b, c)
+      if type(a) == "table" then
+        mt_state.preset = a.preset or 0
+        mt_state.freq = (a.freq and a.freq > 0) and a.freq or 869.525
+        mt_state.dual_watch = (a.dual_watch == nil) and true or (a.dual_watch and true or false)
+      else
+        mt_state.preset = a or 0
+        mt_state.freq = (b and b > 0) and b or 869.525
+        mt_state.dual_watch = (c == nil) and true or (c and true or false)
+      end
+      mt_state.active = true
+      return true
+    end,
+    stop = function() mt_state.active = false end,
+    status = function()
+      local out = {}
+      for k, v in pairs(mt_state) do out[k] = v end
+      return out
+    end,
+    poll = function()
+      local out = {}
+      while #out < 8 and #mt_rx_queue > 0 do
+        out[#out + 1] = table.remove(mt_rx_queue, 1)
+        mt_state.rx_count = mt_state.rx_count + 1
+      end
+      return out
+    end,
+    send_text = function(text, to_id, want_ack)
+      checkstr(text, "meshtastic.send_text")
+      mt_state.tx_count = mt_state.tx_count + 1
+      local pkt_id = 0x5000 + mt_state.tx_count
+      mt_tx_log[#mt_tx_log + 1] = {
+        op = "text", text = tostring(text),
+        to_hex = mt_parse_id(to_id, "ffffffff"),
+        want_ack = (want_ack == nil) or (want_ack and true or false),
+        packet_id = pkt_id,
+      }
+      return pkt_id
+    end,
+    ping = function(to_id, traceroute)
+      mt_state.tx_count = mt_state.tx_count + 1
+      local pkt_id = 0x6000 + mt_state.tx_count
+      mt_tx_log[#mt_tx_log + 1] = {
+        op = "ping",
+        to_hex = mt_parse_id(to_id, "00000000"),
+        traceroute = (traceroute == nil) or (traceroute and true or false),
+        packet_id = pkt_id,
+      }
+      return pkt_id
+    end,
+    beacon = function()
+      mt_state.tx_count = mt_state.tx_count + 1
+      local pkt_id = 0x7000 + mt_state.tx_count
+      mt_tx_log[#mt_tx_log + 1] = { op = "beacon", packet_id = pkt_id }
+      return pkt_id
+    end,
+  }
   return wada
 end
 
@@ -558,7 +648,11 @@ local function reset_world()
   widgets = { canvases = 0, labels = 0, buttons = 0, scroll = false, timer_ms = nil }
   labels, buttons, toasts, drawlog = {}, {}, {}, { text = {}, circles = {}, ops = 0 }
   lists = {}
-  map_obj, map_centers = nil, {}
+  map_obj, map_centers, map_markers, map_lines = nil, {}, {}, {}
+  mt_state = { active = false, dual_watch = true, on_meshtastic = true, preset = 0, freq = 869.525, bw = 250.0, sf = 11, cr = 5, self_id = 0x11223344, self_hex = "11223344", rx_count = 0, tx_count = 0, duty_used_ms = 0, duty_remaining_ms = 360000, last_rssi = -78, last_snr = 7.5 }
+  mt_rx_queue = {}
+  mt_tx_log = {}
+  widget_snap = nil
   clock_ms = 1000
   dm_sent = {}
   audio_state = { state = "stopped", path = "", source = "", format = "", error = nil }
@@ -2526,6 +2620,135 @@ scenarios.inputlen_input = function()
   answer_input(nil)
 end
 
+-- ---- CrossMesh scenarios -----------------------------------------------------
+scenarios.crossmesh = function()
+  local mc_contacts = {
+    { name = "Alpha-MC", pubkey = "aa11223344", type = 1, ago_s = 12, lat = 48.1400, lon = 11.5800, lat_e6 = 48140000, lon_e6 = 11580000 },
+    { name = "Relay-MC", pubkey = "bb11223344", type = 2, ago_s = 45, lat = 48.1300, lon = 11.5700, lat_e6 = 48130000, lon_e6 = 11570000 },
+  }
+  cfg = {
+    w = 320, h = 240,
+    caps = { sdk_ext = true, keyboard = true, touch = true },
+    contacts = mc_contacts,
+    self_lat = 48.1351, self_lon = 11.5820,
+    map_tiles = 4,
+    gps = function() return { lat = 48.1351, lon = 11.5820, sats = 8, alt_m = 520 } end,
+  }
+  storekv = {}
+  wada = build_wada()
+  local app = load_app()
+  assert(guarded(BUDGET, app.on_open, cfg.w, cfg.h))
+  assert(mt_state.active == true, "CrossMesh must start Meshtastic radio on open")
+  assert(mt_state.dual_watch == true, "CrossMesh must default to Dual-Watch mode")
+
+  -- Inject a Meshtastic NodeInfo + Position + Text message into rx queue
+  mt_rx_queue[#mt_rx_queue + 1] = {
+    kind = "nodeinfo", from_id = -1636437718, from_hex = "9e75f12a",
+    to_id = -1, to_hex = "ffffffff", packet_id = 101, request_id = 0,
+    portnum = 4, hop_start = 3, hop_limit = 2, hops = 1,
+    want_ack = false, rssi = -82, snr = 6.5, rx_ms = clock_ms, rtt_ms = 0,
+    long_name = "Sierra-MT", short_name = "SRMT", hw_model = 50, role = 0,
+  }
+  mt_rx_queue[#mt_rx_queue + 1] = {
+    kind = "position", from_id = -1636437718, from_hex = "9e75f12a",
+    to_id = -1, to_hex = "ffffffff", packet_id = 102, request_id = 0,
+    portnum = 3, hop_start = 3, hop_limit = 2, hops = 1,
+    want_ack = false, rssi = -81, snr = 6.75, rx_ms = clock_ms, rtt_ms = 0,
+    has_pos = true, lat_i = 481450000, lon_i = 115900000,
+    lat_e6 = 48145000, lon_e6 = 11590000, lat = 48.1450, lon = 11.5900, alt_m = 540, pos_time = 1700000000,
+  }
+  mt_rx_queue[#mt_rx_queue + 1] = {
+    kind = "text", from_id = -1636437718, from_hex = "9e75f12a",
+    to_id = -1, to_hex = "ffffffff", packet_id = 103, request_id = 0,
+    portnum = 1, hop_start = 3, hop_limit = 2, hops = 1,
+    want_ack = false, rssi = -80, snr = 7.0, rx_ms = clock_ms, rtt_ms = 0,
+    text = "CQ from Meshtastic LongFast!",
+  }
+
+  tick(app, 2, 250)
+
+  -- 1. Verify Map tab markers: Blue (0x2D8CFF) for MeshCore, Green (0x53C06B) for Meshtastic, Amber (0xE8A33D) for Self
+  local saw_blue, saw_green, saw_amber = false, false, false
+  for _, m in ipairs(map_markers) do
+    if m.col == 0x2D8CFF then saw_blue = true end
+    if m.col == 0x53C06B then saw_green = true end
+    if m.col == 0xE8A33D then saw_amber = true end
+  end
+  for _, c in ipairs(drawlog.circles) do
+    if c.col == 0x2D8CFF then saw_blue = true end
+    if c.col == 0x53C06B then saw_green = true end
+    if c.col == 0xE8A33D then saw_amber = true end
+  end
+  assert(saw_blue, "Map must plot MeshCore nodes in Blue (0x2D8CFF)")
+  assert(saw_green, "Map must plot Meshtastic nodes in Green (0x53C06B)")
+  assert(saw_amber, "Map must plot Self position in Amber (0xE8A33D)")
+
+  -- 2. Switch to Nodes/Ping tab (key '2') and verify Ping + Traceroute + Beacon
+  key(app, "2")
+  tick(app, 1, 250)
+  local dump2 = label_dump()
+  assert(dump2:find("Sierra%-MT") or dump2:find("SRMT"), "Nodes tab must show heard Meshtastic node Sierra-MT: " .. dump2)
+  assert(dump2:find("Alpha%-MC"), "Nodes tab must show MeshCore contact Alpha-MC: " .. dump2)
+
+  -- Trigger Ping/Traceroute on selected Meshtastic node
+  key(app, "p")
+  assert(#mt_tx_log >= 1 and mt_tx_log[#mt_tx_log].op == "ping", "key 'p' must send Meshtastic ping/traceroute")
+  local ping_pkt_id = mt_tx_log[#mt_tx_log].packet_id
+  assert(mt_tx_log[#mt_tx_log].to_hex == "9e75f12a", "ping target must be 9e75f12a, got " .. tostring(mt_tx_log[#mt_tx_log].to_hex))
+
+  -- Simulate Traceroute + Routing ACK response
+  mt_rx_queue[#mt_rx_queue + 1] = {
+    kind = "traceroute", from_id = -1636437718, from_hex = "9e75f12a",
+    to_id = 0x11223344, to_hex = "11223344", packet_id = 201, request_id = ping_pkt_id,
+    portnum = 70, hop_start = 3, hop_limit = 2, hops = 1,
+    want_ack = false, rssi = -79, snr = 7.25, rx_ms = clock_ms + 380, rtt_ms = 380,
+    route = { "deadbeef" }, snr_towards = { 6.5, 4.0 },
+    route_back = { "deadbeef" }, snr_back = { 5.0, 7.25 },
+  }
+  tick(app, 1, 400)
+  local dump_ping = label_dump()
+  assert(dump_ping:find("380") and (dump_ping:find("deadbeef") or dump_ping:find("1 hop") or dump_ping:find("RTT")),
+         "Ping/Traceroute result must show RTT 380ms and route info: " .. dump_ping)
+
+  -- Trigger Beacon ('b')
+  key(app, "b")
+  assert(mt_tx_log[#mt_tx_log].op == "beacon", "key 'b' must transmit Meshtastic NodeInfo+Position beacon")
+
+  -- 3. Switch to Chat tab (key '3'), check incoming message, compose & send message, verify ACK update
+  key(app, "3")
+  tick(app, 1, 250)
+  local dump3 = label_dump()
+  assert(dump3:find("CQ from Meshtastic LongFast!"), "Chat tab must display incoming Meshtastic text: " .. dump3)
+
+  key(app, "c")
+  assert(input_prompt ~= nil, "key 'c' must open wada.ui.input prompt for composing Meshtastic message")
+  answer_input("Hello Meshtastic from MeshCore!")
+  assert(mt_tx_log[#mt_tx_log].op == "text", "answering compose prompt must call wada.meshtastic.send_text")
+  assert(mt_tx_log[#mt_tx_log].text == "Hello Meshtastic from MeshCore!", "sent text must match input")
+  local chat_pkt_id = mt_tx_log[#mt_tx_log].packet_id
+
+  -- Deliver routing ACK for chat message
+  mt_rx_queue[#mt_rx_queue + 1] = {
+    kind = "routing", from_id = -1636437718, from_hex = "9e75f12a",
+    to_id = 0x11223344, to_hex = "11223344", packet_id = 202, request_id = chat_pkt_id,
+    portnum = 5, hop_start = 3, hop_limit = 3, hops = 0,
+    want_ack = false, rssi = -77, snr = 8.0, rx_ms = clock_ms + 240, rtt_ms = 240,
+    error_reason = 0,
+  }
+  tick(app, 5, 300)
+  local dump_ack = label_dump()
+  assert(dump_ack:find("Hello Meshtastic from MeshCore!") and (dump_ack:find("ACK") or dump_ack:find("240ms")),
+         "Chat message must show ACK status after routing reply: " .. dump_ack)
+
+  -- 4. Verify persistence and clean teardown
+  assert(fsfiles["nodes.tsv"] and fsfiles["nodes.tsv"]:find("9e75f12a"), "Heard Meshtastic nodes must persist to nodes.tsv")
+  assert(fsfiles["chat.tsv"] and fsfiles["chat.tsv"]:find("Hello Meshtastic from MeshCore!"), "Chat history must persist to chat.tsv")
+  assert(widget_snap ~= nil, "Home widget snapshot must be updated")
+
+  app.on_close()
+  assert(mt_state.active == false, "on_close must call wada.meshtastic.stop()")
+end
+
 -- True (and says so) when this app has no scenarios of its own. Returning a
 -- truthy value makes the dispatch below pick an EMPTY list rather than running
 -- someone else's tests against it.
@@ -2557,6 +2780,8 @@ local order = APP_PATH:find("/sdscan/", 1, true)
   and { "inputlen_random", "inputlen_input" }
   or APP_PATH:find("/mapfetch/", 1, true)
   and { "mapfetch_tdeck", "mapfetch_no_map", "mapfetch_no_gps", "mapfetch_swipe", "mapfetch_logic", "mapfetch_done", "mapfetch_cost" }
+  or APP_PATH:find("/crossmesh/", 1, true)
+  and { "crossmesh" }
   -- The compass list below is gpscompass's own, NOT a default. An app with no
   -- branch used to fall through to it and "fail" on tests written for a
   -- different app -- six of the store apps do, so a full run came back red and
