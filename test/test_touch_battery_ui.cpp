@@ -34,17 +34,16 @@ int main() {
   assert(touchBatteryColorForPct(-1, false, kGreen, kOrange, kRed, kUnknown) == kUnknown);
   assert(touchBatteryColorForPct(-1, true,  kGreen, kOrange, kRed, kUnknown) == kGreen);
 
-  // 3. 5-step solid FontAwesome battery level glyphs (never replaced by empty outline when charging)
+  // 3. 4 visually distinct battery level glyphs (never replaced by empty outline when charging)
   assert(std::strcmp(touchBatteryLevelGlyphForPct(-1),  TOUCH_BATT_SYM_EMPTY) == 0);
   assert(std::strcmp(touchBatteryLevelGlyphForPct(0),   TOUCH_BATT_SYM_EMPTY) == 0);
   assert(std::strcmp(touchBatteryLevelGlyphForPct(14),  TOUCH_BATT_SYM_EMPTY) == 0);
   assert(std::strcmp(touchBatteryLevelGlyphForPct(15),  TOUCH_BATT_SYM_1)     == 0);
   assert(std::strcmp(touchBatteryLevelGlyphForPct(39),  TOUCH_BATT_SYM_1)     == 0);
   assert(std::strcmp(touchBatteryLevelGlyphForPct(40),  TOUCH_BATT_SYM_2)     == 0);
-  assert(std::strcmp(touchBatteryLevelGlyphForPct(64),  TOUCH_BATT_SYM_2)     == 0);
-  assert(std::strcmp(touchBatteryLevelGlyphForPct(65),  TOUCH_BATT_SYM_3)     == 0);
-  assert(std::strcmp(touchBatteryLevelGlyphForPct(89),  TOUCH_BATT_SYM_3)     == 0);
-  assert(std::strcmp(touchBatteryLevelGlyphForPct(90),  TOUCH_BATT_SYM_FULL)  == 0);
+  assert(std::strcmp(touchBatteryLevelGlyphForPct(74),  TOUCH_BATT_SYM_2)     == 0);
+  assert(std::strcmp(touchBatteryLevelGlyphForPct(75),  TOUCH_BATT_SYM_FULL)  == 0);
+  assert(std::strcmp(touchBatteryLevelGlyphForPct(79),  TOUCH_BATT_SYM_FULL)  == 0);
   assert(std::strcmp(touchBatteryLevelGlyphForPct(100), TOUCH_BATT_SYM_FULL)  == 0);
 
   // 4. Unambiguous charging vs not-charging formatting for status bar % and combined icon
@@ -62,10 +61,10 @@ int main() {
   assert(std::strcmp(buf, TOUCH_BATT_SYM_CHARGE) == 0);
 
   touchBatteryFormatIconWithCharge(buf, sizeof(buf), 79, false);
-  assert(std::strcmp(buf, TOUCH_BATT_SYM_3) == 0);
+  assert(std::strcmp(buf, TOUCH_BATT_SYM_FULL) == 0);
 
   touchBatteryFormatIconWithCharge(buf, sizeof(buf), 79, true);
-  assert(std::strcmp(buf, TOUCH_BATT_SYM_CHARGE " " TOUCH_BATT_SYM_3) == 0);
+  assert(std::strcmp(buf, TOUCH_BATT_SYM_CHARGE " " TOUCH_BATT_SYM_FULL) == 0);
 
   return 0;
 }

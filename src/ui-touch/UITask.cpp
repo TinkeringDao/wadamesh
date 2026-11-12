@@ -42103,6 +42103,14 @@ static void applyBattColor() {
     c_icon = lvl_c;
     c_pct  = lvl_c;
   }
+  if (touchSleep::enabled()) {
+    const lv_color_t saver_c = lv_color_hex(s_theme_high_contrast ? COLOR_TEXT : 0xFFD60A);
+#if CAP_ROUND_CORNERS
+    c_icon = saver_c;
+#else
+    c_pct  = saver_c;
+#endif
+  }
   if (g_statusbar.batt_icon) lv_obj_set_style_text_color(g_statusbar.batt_icon, c_icon, LV_PART_MAIN);
   if (g_statusbar.batt_pct)  lv_obj_set_style_text_color(g_statusbar.batt_pct,  c_pct,  LV_PART_MAIN);
 }
