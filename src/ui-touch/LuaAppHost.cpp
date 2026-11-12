@@ -20,6 +20,7 @@
 #include "i18n.h"   // wada.sys.tr: apps can use the same translation table the UI does
 #include "Utf8Text.h"
 #include "LuaRandomRange.h"   // wada.sys.random(lo, hi), host-tested
+#include "helpers/MeshtasticRadio.h"       // wada.meshtastic: dual-mesh cross-play radio bridge
 #include "helpers/esp32/WdtHeavyGuard.h"   // wada.fs writes can trigger SPIFFS GC
 
 extern "C" {
@@ -2937,6 +2938,196 @@ int cryptoHex(lua_State* L) {
 }
 #endif
 
+// ---- wada.meshtastic: dual-mesh cross-play bridge ---------------------------
+static uint32_t mtParseNodeId(lua_State* L, int idx, uint32_t def_val) {
+  if (lua_isnoneornil(L, idx)) return def_val;
+  if (lua_isinteger(L, idx)) return (uint32_t)lua_tointeger(L, idx);
+  if (lua_isstring(L, idx)) {
+    const char* s = lua_tostring(L, idx);
+    if (!s || !*s) return def_val;
+    if (s[0] == '!') ++s;
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+    char* endp = nullptr;
+    unsigned long v = strtoul(s, &endp, 16);
+    if (endp && endp != s) return (uint32_t)v;
+  }
+  return (uint32_t)luaL_optinteger(L, idx, (lua_Integer)def_val);
+}
+
+static int mtStart(lua_State* L) {
+  uint8_t preset = 0;
+  float   freq   = 0.0f;
+  bool    dual   = true;
+  if (lua_istable(L, 1)) {
+    lua_getfield(L, 1, "preset");
+    if (!lua_isnil(L, -1)) preset = (uint8_t)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+    lua_getfield(L, 1, "freq");
+    if (!lua_isnil(L, -1)) freq = (float)lua_tonumber(L, -1);
+    lua_pop(L, 1);
+    lua_getfield(L, 1, "dual_watch");
+    if (!lua_isnil(L, -1)) dual = lua_toboolean(L, -1) != 0;
+    lua_pop(L, 1);
+  } else {
+    preset = (uint8_t)luaL_optinteger(L, 1, 0);
+    freq   = (float)luaL_optnumber(L, 2, 0.0);
+    dual   = lua_isnoneornil(L, 3) ? true : (lua_toboolean(L, 3) != 0);
+  }
+  lua_pushboolean(L, meshtasticRadioStart(preset, freq, dual) ? 1 : 0);
+  return 1;
+}
+
+static int mtStop(lua_State* L) {
+  (void)L;
+  meshtasticRadioStop();
+  return 0;
+}
+
+static int mtStatus(lua_State* L) {
+  MeshtasticRadioStatus st{};
+  meshtasticRadioGetStatus(&st);
+  char self_hex[10];
+  snprintf(self_hex, sizeof(self_hex), "%08x", (unsigned)st.self_id);
+  lua_createtable(L, 0, 16);
+  lua_pushboolean(L, st.active ? 1 : 0);        lua_setfield(L, -2, "active");
+  lua_pushboolean(L, st.dual_watch ? 1 : 0);    lua_setfield(L, -2, "dual_watch");
+  lua_pushboolean(L, st.on_meshtastic ? 1 : 0); lua_setfield(L, -2, "on_meshtastic");
+  lua_pushinteger(L, st.preset);                lua_setfield(L, -2, "preset");
+  lua_pushnumber(L, st.freq_mhz);               lua_setfield(L, -2, "freq");
+  lua_pushnumber(L, st.bw_khz);                 lua_setfield(L, -2, "bw");
+  lua_pushinteger(L, st.sf);                    lua_setfield(L, -2, "sf");
+  lua_pushinteger(L, st.cr);                    lua_setfield(L, -2, "cr");
+  lua_pushinteger(L, (lua_Integer)st.self_id);  lua_setfield(L, -2, "self_id");
+  lua_pushstring(L, self_hex);                  lua_setfield(L, -2, "self_hex");
+  lua_pushinteger(L, (lua_Integer)st.rx_count); lua_setfield(L, -2, "rx_count");
+  lua_pushinteger(L, (lua_Integer)st.tx_count); lua_setfield(L, -2, "tx_count");
+  lua_pushinteger(L, (lua_Integer)st.duty_used_ms);      lua_setfield(L, -2, "duty_used_ms");
+  lua_pushinteger(L, (lua_Integer)st.duty_remaining_ms); lua_setfield(L, -2, "duty_remaining_ms");
+  lua_pushinteger(L, st.last_rssi);             lua_setfield(L, -2, "last_rssi");
+  lua_pushnumber(L, st.last_snr);               lua_setfield(L, -2, "last_snr");
+  return 1;
+}
+
+static int mtPoll(lua_State* L) {
+  lua_newtable(L);
+  MeshtasticRxEvent ev{};
+  int out = 0;
+  while (out < 8 && meshtasticRadioPopRx(&ev)) {
+    char from_hex[10], to_hex[10];
+    snprintf(from_hex, sizeof(from_hex), "%08x", (unsigned)ev.from_id);
+    snprintf(to_hex, sizeof(to_hex), "%08x", (unsigned)ev.to_id);
+    const int hops = (ev.hop_start >= ev.hop_limit) ? (int)(ev.hop_start - ev.hop_limit) : 0;
+
+    lua_createtable(L, 0, 20);
+    lua_pushstring(L, ev.kind);                     lua_setfield(L, -2, "kind");
+    lua_pushinteger(L, (lua_Integer)ev.from_id);    lua_setfield(L, -2, "from_id");
+    lua_pushstring(L, from_hex);                    lua_setfield(L, -2, "from_hex");
+    lua_pushinteger(L, (lua_Integer)ev.to_id);      lua_setfield(L, -2, "to_id");
+    lua_pushstring(L, to_hex);                      lua_setfield(L, -2, "to_hex");
+    lua_pushinteger(L, (lua_Integer)ev.packet_id);  lua_setfield(L, -2, "packet_id");
+    lua_pushinteger(L, (lua_Integer)ev.request_id); lua_setfield(L, -2, "request_id");
+    lua_pushinteger(L, ev.portnum);                 lua_setfield(L, -2, "portnum");
+    lua_pushinteger(L, ev.hop_start);               lua_setfield(L, -2, "hop_start");
+    lua_pushinteger(L, ev.hop_limit);               lua_setfield(L, -2, "hop_limit");
+    lua_pushinteger(L, hops);                       lua_setfield(L, -2, "hops");
+    lua_pushboolean(L, ev.want_ack ? 1 : 0);        lua_setfield(L, -2, "want_ack");
+    lua_pushinteger(L, ev.rssi);                    lua_setfield(L, -2, "rssi");
+    lua_pushnumber(L, ev.snr);                      lua_setfield(L, -2, "snr");
+    lua_pushinteger(L, (lua_Integer)ev.rx_ms);      lua_setfield(L, -2, "rx_ms");
+    lua_pushinteger(L, (lua_Integer)ev.rtt_ms);     lua_setfield(L, -2, "rtt_ms");
+
+    if (strcmp(ev.kind, "text") == 0) {
+      lua_pushstring(L, ev.text); lua_setfield(L, -2, "text");
+    } else if (strcmp(ev.kind, "position") == 0) {
+      lua_pushboolean(L, ev.has_pos ? 1 : 0);           lua_setfield(L, -2, "has_pos");
+      lua_pushinteger(L, (lua_Integer)ev.lat_i);        lua_setfield(L, -2, "lat_i");
+      lua_pushinteger(L, (lua_Integer)ev.lon_i);        lua_setfield(L, -2, "lon_i");
+      lua_pushinteger(L, (lua_Integer)(ev.lat_i / 10)); lua_setfield(L, -2, "lat_e6");
+      lua_pushinteger(L, (lua_Integer)(ev.lon_i / 10)); lua_setfield(L, -2, "lon_e6");
+      lua_pushnumber(L, (double)ev.lat_i * 1e-7);       lua_setfield(L, -2, "lat");
+      lua_pushnumber(L, (double)ev.lon_i * 1e-7);       lua_setfield(L, -2, "lon");
+      lua_pushinteger(L, (lua_Integer)ev.alt_m);        lua_setfield(L, -2, "alt_m");
+      lua_pushinteger(L, (lua_Integer)ev.pos_time);     lua_setfield(L, -2, "pos_time");
+    } else if (strcmp(ev.kind, "nodeinfo") == 0) {
+      lua_pushstring(L, ev.long_name);  lua_setfield(L, -2, "long_name");
+      lua_pushstring(L, ev.short_name); lua_setfield(L, -2, "short_name");
+      lua_pushinteger(L, ev.hw_model);  lua_setfield(L, -2, "hw_model");
+      lua_pushinteger(L, ev.role);      lua_setfield(L, -2, "role");
+    } else if (strcmp(ev.kind, "routing") == 0 || strcmp(ev.kind, "ack") == 0) {
+      lua_pushinteger(L, ev.error_reason); lua_setfield(L, -2, "error_reason");
+    } else if (strcmp(ev.kind, "traceroute") == 0) {
+      lua_createtable(L, ev.route_count, 0);
+      for (uint8_t i = 0; i < ev.route_count && i < 8; ++i) {
+        char rh[10];
+        snprintf(rh, sizeof(rh), "%08x", (unsigned)ev.route[i]);
+        lua_pushstring(L, rh);
+        lua_rawseti(L, -2, i + 1);
+      }
+      lua_setfield(L, -2, "route");
+      lua_createtable(L, ev.snr_towards_count, 0);
+      for (uint8_t i = 0; i < ev.snr_towards_count && i < 8; ++i) {
+        lua_pushnumber(L, (float)ev.snr_towards[i] / 4.0f);
+        lua_rawseti(L, -2, i + 1);
+      }
+      lua_setfield(L, -2, "snr_towards");
+      lua_createtable(L, ev.route_back_count, 0);
+      for (uint8_t i = 0; i < ev.route_back_count && i < 8; ++i) {
+        char rh[10];
+        snprintf(rh, sizeof(rh), "%08x", (unsigned)ev.route_back[i]);
+        lua_pushstring(L, rh);
+        lua_rawseti(L, -2, i + 1);
+      }
+      lua_setfield(L, -2, "route_back");
+      lua_createtable(L, ev.snr_back_count, 0);
+      for (uint8_t i = 0; i < ev.snr_back_count && i < 8; ++i) {
+        lua_pushnumber(L, (float)ev.snr_back[i] / 4.0f);
+        lua_rawseti(L, -2, i + 1);
+      }
+      lua_setfield(L, -2, "snr_back");
+    }
+    lua_rawseti(L, -2, ++out);
+  }
+  return 1;
+}
+
+static int mtSendText(lua_State* L) {
+  const char* text = luaL_checkstring(L, 1);
+  const uint32_t to_id = mtParseNodeId(L, 2, 0xFFFFFFFFu);
+  const bool want_ack = lua_isnoneornil(L, 3) ? true : (lua_toboolean(L, 3) != 0);
+  const uint32_t pkt_id = meshtasticRadioSendText(text, to_id, want_ack);
+  if (!pkt_id) {
+    lua_pushboolean(L, 0);
+    lua_pushstring(L, "rate limited");
+    return 2;
+  }
+  lua_pushinteger(L, (lua_Integer)pkt_id);
+  return 1;
+}
+
+static int mtPing(lua_State* L) {
+  const uint32_t to_id = mtParseNodeId(L, 1, 0u);
+  const bool traceroute = lua_isnoneornil(L, 2) ? true : (lua_toboolean(L, 2) != 0);
+  const uint32_t pkt_id = meshtasticRadioPing(to_id, traceroute);
+  if (!pkt_id) {
+    lua_pushboolean(L, 0);
+    lua_pushstring(L, "rate limited");
+    return 2;
+  }
+  lua_pushinteger(L, (lua_Integer)pkt_id);
+  return 1;
+}
+
+static int mtBeacon(lua_State* L) {
+  const uint32_t pkt_id = meshtasticRadioBeacon();
+  if (!pkt_id) {
+    lua_pushboolean(L, 0);
+    lua_pushstring(L, "rate limited");
+    return 2;
+  }
+  lua_pushinteger(L, (lua_Integer)pkt_id);
+  return 1;
+}
+
 // ---- module registration ----
 void openWada(lua_State* L) {
   lua_newtable(L);                                       // wada
@@ -3094,6 +3285,20 @@ void openWada(lua_State* L) {
   lua_pushcfunction(L, netHttpGet);  lua_setfield(L, -2, "http_get");
   lua_pushcfunction(L, netHttpPost); lua_setfield(L, -2, "http_post");
   lua_setfield(L, -2, "net");
+
+  lua_newtable(L);                                       // wada.meshtastic
+  lua_pushcfunction(L, mtStart);    lua_setfield(L, -2, "start");
+  lua_pushcfunction(L, mtStop);     lua_setfield(L, -2, "stop");
+  lua_pushcfunction(L, mtStatus);   lua_setfield(L, -2, "status");
+  lua_pushcfunction(L, mtPoll);     lua_setfield(L, -2, "poll");
+  lua_pushcfunction(L, mtSendText); lua_setfield(L, -2, "send_text");
+  lua_pushcfunction(L, mtPing);     lua_setfield(L, -2, "ping");
+  lua_pushcfunction(L, mtBeacon);   lua_setfield(L, -2, "beacon");
+  lua_pushinteger(L, 0); lua_setfield(L, -2, "PRESET_LONG_FAST");
+  lua_pushinteger(L, 1); lua_setfield(L, -2, "PRESET_LONG_MODERATE");
+  lua_pushinteger(L, 2); lua_setfield(L, -2, "PRESET_MEDIUM_FAST");
+  lua_pushinteger(L, 3); lua_setfield(L, -2, "PRESET_SHORT_FAST");
+  lua_setfield(L, -2, "meshtastic");
 
   lua_setglobal(L, "wada");
 
@@ -3352,6 +3557,7 @@ void hostTeardown() {
                   (unsigned)h->heap.used, (unsigned)h->heap.peak,
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
   }
+  meshtasticRadioStop();   // unconditionally restore MeshCore radio params on any close/crash path
   if (h->root) appPageDeleteRootAsync(h->root);
   appPageEnd(&luaAppDismiss);
   delete h;
