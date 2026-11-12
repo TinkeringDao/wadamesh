@@ -28,6 +28,8 @@ local sel_idx = 1
 local chat_msgs = {}      -- array of { dir="rx"|"tx", from=..., to_hex=..., text=..., pkt_id=..., status=..., rtt_ms=... }
 local last_ping_str = "Press P or tap Ping to probe a Meshtastic node"
 local last_widget_ms = -5000
+local last_nodes_save_ms = 0
+local tick_count = 0
 local nodes_dirty = false
 local chat_dirty = false
 
@@ -83,6 +85,7 @@ local function save_nodes()
   end
   if wada.fs.write("nodes.tsv", table.concat(lines, "\n")) then
     nodes_dirty = false
+    last_nodes_save_ms = wada.sys.millis()
     return true
   end
   return false
@@ -129,8 +132,9 @@ local function save_chat()
   return false
 end
 
-local function flush_dirty_fs()
-  if nodes_dirty then
+local function flush_dirty_fs(force_nodes)
+  local now = wada.sys.millis()
+  if nodes_dirty and (force_nodes or last_nodes_save_ms == 0 or (now - last_nodes_save_ms >= 10000)) then
     save_nodes()
   end
   if chat_dirty then
@@ -165,6 +169,10 @@ local function ensure_mt_node(hex, id)
     }
     mt_nodes[hex] = n
     mt_order[#mt_order + 1] = hex
+    while #mt_order > 128 do
+      local old = table.remove(mt_order, 1)
+      if old then mt_nodes[old] = nil end
+    end
   end
   return n
 end
@@ -381,16 +389,31 @@ local function do_toggle_mode()
   refresh_ui()
 end
 
-local function do_compose()
+local function do_compose(dm_selected)
   if not wada.ui.input then return end
-  wada.ui.input("Meshtastic Message", "", function(text)
+  rebuild_combined()
+  local dst_hex = "ffffffff"
+  local title = "Meshtastic #LongFast"
+  if dm_selected then
+    local sel = combined[sel_idx]
+    if not sel or sel.kind ~= "MT" then
+      for _, item in ipairs(combined) do
+        if item.kind == "MT" then sel = item; break end
+      end
+    end
+    if sel and sel.kind == "MT" and sel.hex then
+      dst_hex = sel.hex
+      title = "MT DM !" .. dst_hex
+    end
+  end
+  wada.ui.input(title, "", function(text)
     if not text or text == "" then return end
-    local pkt_id, err = wada.meshtastic.send_text(text, "ffffffff", true)
+    local pkt_id, err = wada.meshtastic.send_text(text, dst_hex, true)
     local st = pkt_id and "wait" or ("err:" .. tostring(err))
     chat_msgs[#chat_msgs + 1] = {
       dir = "tx",
-      from = "Me",
-      to_hex = "ffffffff",
+      from = dst_hex == "ffffffff" and "Me" or ("Me->!" .. dst_hex:sub(5, 8)),
+      to_hex = dst_hex,
       text = text,
       pkt_id = pkt_id or 0,
       status = st,
@@ -452,9 +475,10 @@ switch_tab = function(new_tab)
     for i = 1, max_rows do
       lbl_rows[i] = wada.ui.label("", 4, body_y + (i - 1) * 18, 12, C.text)
     end
-    local cbw = math.floor((W - 12) / 2)
-    wada.ui.button("Compose (C)", 4, H - 24, cbw, 22, do_compose)
-    wada.ui.button("Beacon (B)", 8 + cbw, H - 24, cbw, 22, do_beacon)
+    local cbw = math.floor((W - 16) / 3)
+    wada.ui.button("Compose (C)", 4, H - 24, cbw, 22, function() do_compose(false) end)
+    wada.ui.button("DM (D)", 8 + cbw, H - 24, cbw, 22, function() do_compose(true) end)
+    wada.ui.button("Beacon (B)", 12 + cbw * 2, H - 24, cbw, 22, do_beacon)
   end
 
   refresh_ui()
@@ -545,11 +569,12 @@ function app.on_open(w, h)
 end
 
 function app.on_tick(dt)
+  tick_count = tick_count + 1
   local changed = process_mt_events()
   if nodes_dirty or chat_dirty then
-    flush_dirty_fs()
+    flush_dirty_fs(false)
   end
-  if changed or tab == 1 then
+  if changed or (tab == 1 and (tick_count % 8 == 0)) then
     refresh_ui()
   end
 end
@@ -576,7 +601,8 @@ function app.on_input(ev)
     elseif k == "p" or k == "P" then do_ping()
     elseif k == "b" or k == "B" then do_beacon()
     elseif k == "m" or k == "M" then do_toggle_mode()
-    elseif k == "c" or k == "C" then do_compose()
+    elseif k == "c" or k == "C" then do_compose(false)
+    elseif k == "d" or k == "D" then do_compose(true)
     elseif k == "+" or k == "=" then
       map_zoom = math.min(16, map_zoom + 1)
       if tab == 1 then draw_map_view() end
@@ -596,8 +622,7 @@ function app.on_close()
     map_v:close()
     map_v = nil
   end
-  if nodes_dirty then save_nodes() end
-  if chat_dirty then save_chat() end
+  flush_dirty_fs(true)
   if wada.meshtastic and wada.meshtastic.stop then
     wada.meshtastic.stop()
   end

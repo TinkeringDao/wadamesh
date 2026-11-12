@@ -2740,6 +2740,13 @@ scenarios.crossmesh = function()
   assert(dump_ack:find("Hello Meshtastic from MeshCore!") and (dump_ack:find("ACK") or dump_ack:find("240ms")),
          "Chat message must show ACK status after routing reply: " .. dump_ack)
 
+  -- Test Direct Message ('d') to selected Meshtastic node (9e75f12a)
+  key(app, "d")
+  assert(input_prompt ~= nil, "key 'd' must open wada.ui.input prompt for DM")
+  answer_input("Direct message to Sierra-MT")
+  assert(mt_tx_log[#mt_tx_log].op == "text" and mt_tx_log[#mt_tx_log].to_hex == "9e75f12a",
+         "DM must address selected Meshtastic node 9e75f12a, got " .. tostring(mt_tx_log[#mt_tx_log].to_hex))
+
   -- 4. Verify persistence and clean teardown
   assert(fsfiles["nodes.tsv"] and fsfiles["nodes.tsv"]:find("9e75f12a"), "Heard Meshtastic nodes must persist to nodes.tsv")
   assert(fsfiles["chat.tsv"] and fsfiles["chat.tsv"]:find("Hello Meshtastic from MeshCore!"), "Chat history must persist to chat.tsv")

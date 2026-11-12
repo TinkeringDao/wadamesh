@@ -82875,7 +82875,7 @@ void UITask::loop() {
   // but if the page ever vanished without that, the mesh would stay off the
   // radio forever — so re-apply the mesh params and release ownership here.
   if (s_spectrum_active && !s_spec_root) spectrumRestoreRadio();
-  if (!luaAppIsOpen() && meshtasticRadioOwnsHardware()) meshtasticRadioStop();
+  if (!luaAppIsOpen()) meshtasticRadioStop();
   meshtasticRadioTick();
   uiCp("ui:hist");
   flushHistoryIfDue(now);

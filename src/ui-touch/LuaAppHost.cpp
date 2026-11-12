@@ -1105,6 +1105,7 @@ int sysCaps(lua_State* L) {
   lua_pushboolean(L, CAP_LUA_SDK_EXT);  lua_setfield(L, -2, "widget");     // wada.widget (a Home widget)
   lua_pushboolean(L, 1);                lua_setfield(L, -2, "panel");      // wada.ui.panel, ui.label bold, size 24
   lua_pushboolean(L, CAP_LUA_AUDIO);    lua_setfield(L, -2, "audio_events"); // app.on_audio
+  lua_pushboolean(L, CAP_RADIO_TOOLS);  lua_setfield(L, -2, "meshtastic"); // wada.meshtastic dual-mesh bridge
 #if defined(HAS_TDECK_PRO)
   lua_pushboolean(L, 1);                lua_setfield(L, -2, "epaper");     // T-Deck Pro / Max: redraw sparingly
 #else
@@ -2954,13 +2955,25 @@ static uint32_t mtParseNodeId(lua_State* L, int idx, uint32_t def_val) {
   return (uint32_t)luaL_optinteger(L, idx, (lua_Integer)def_val);
 }
 
+static uint8_t mtParsePreset(lua_State* L, int idx) {
+  if (lua_type(L, idx) == LUA_TSTRING) {
+    const char* s = lua_tostring(L, idx);
+    if (!s) return 0;
+    if (strcasecmp(s, "longmoderate") == 0 || strcasecmp(s, "lm") == 0) return 1;
+    if (strcasecmp(s, "mediumfast") == 0 || strcasecmp(s, "mf") == 0)   return 2;
+    if (strcasecmp(s, "shortfast") == 0 || strcasecmp(s, "sf") == 0)    return 3;
+    return 0;
+  }
+  return (uint8_t)luaL_optinteger(L, idx, 0);
+}
+
 static int mtStart(lua_State* L) {
   uint8_t preset = 0;
   float   freq   = 0.0f;
   bool    dual   = true;
   if (lua_istable(L, 1)) {
     lua_getfield(L, 1, "preset");
-    if (!lua_isnil(L, -1)) preset = (uint8_t)lua_tointeger(L, -1);
+    if (!lua_isnil(L, -1)) preset = mtParsePreset(L, -1);
     lua_pop(L, 1);
     lua_getfield(L, 1, "freq");
     if (!lua_isnil(L, -1)) freq = (float)lua_tonumber(L, -1);
@@ -2969,7 +2982,7 @@ static int mtStart(lua_State* L) {
     if (!lua_isnil(L, -1)) dual = lua_toboolean(L, -1) != 0;
     lua_pop(L, 1);
   } else {
-    preset = (uint8_t)luaL_optinteger(L, 1, 0);
+    preset = mtParsePreset(L, 1);
     freq   = (float)luaL_optnumber(L, 2, 0.0);
     dual   = lua_isnoneornil(L, 3) ? true : (lua_toboolean(L, 3) != 0);
   }

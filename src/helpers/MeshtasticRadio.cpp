@@ -90,7 +90,7 @@ static void presetModemParams(uint8_t preset, float* bw_khz, uint8_t* sf, uint8_
 #if defined(ESP32)
 static uint32_t nowMs() { return millis(); }
 static uint32_t nextPacketId() {
-  uint32_t r = esp_random();
+  uint32_t r = esp_random() & 0x7FFFFFFFu;
   return r ? r : 1u;
 }
 #else
@@ -172,8 +172,10 @@ static void armHardwareRx(uint16_t preamble_len) {
   radio.setPreambleLength(preamble_len);
   radio.startReceive();
   if (!radio_driver.isInRecvMode()) {
-    uint8_t scratch[4];
-    (void)radio_driver.recvRaw(scratch, sizeof(scratch));
+    uint8_t scratch[256];
+    for (int i = 0; i < 10 && !radio_driver.isInRecvMode(); ++i) {
+      (void)radio_driver.recvRaw(scratch, sizeof(scratch));
+    }
     radio.setPreambleLength(preamble_len);
     radio.startReceive();
   }
@@ -353,6 +355,9 @@ static void pollHardwareRx() {
       for (uint8_t i = 0; i < dec.snr_towards_cnt && i < 8; ++i) ev.snr_towards[i] = dec.snr_towards[i];
       for (uint8_t i = 0; i < dec.route_back_cnt && i < 8; ++i) ev.route_back[i] = dec.route_back[i];
       for (uint8_t i = 0; i < dec.snr_back_cnt && i < 8; ++i) ev.snr_back[i] = dec.snr_back[i];
+      pushRxEvent(ev);
+    } else {
+      snprintf(ev.kind, sizeof(ev.kind), "other");
       pushRxEvent(ev);
     }
   }
@@ -621,10 +626,12 @@ uint32_t meshtasticRadioBeacon() {
   }
 
   const uint32_t pkt_id = nextPacketId();
+  char long_name[40];
+  snprintf(long_name, sizeof(long_name), "%s [MC]", name[0] ? name : "WadaMesh");
   uint8_t wire[256];
   size_t wire_len = MeshtasticWire::encodeNodeInfoPacket(
       wire, sizeof(wire), s_self_node_id, pkt_id, kDefaultChannelHash,
-      MeshtasticWire::kDefaultLongFastKey, name[0] ? name : "WadaMesh", short_name);
+      MeshtasticWire::kDefaultLongFastKey, long_name, short_name);
   if (wire_len == 0) return 0;
 
   uint32_t sent_id = transmitWireFrame(wire, wire_len, pkt_id, MeshtasticWire::kBroadcastAddr, false);
