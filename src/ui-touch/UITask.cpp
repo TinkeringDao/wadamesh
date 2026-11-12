@@ -1,6 +1,7 @@
 #include "UITask.h"
 #include "TouchSleep.h"
 #include "ChatHashtag.h"
+#include "../helpers/TouchBatteryUi.h"
 #include <climits>         // INT_MAX (glibc does not pull it in transitively, macOS/ESP-IDF do)
 
 #if defined(WADA_WEB)
@@ -8865,7 +8866,7 @@ static const SettingsCatDef kSettingsCats[CAT_COUNT] = {
   { "Bluetooth",     UI_ICON_BLUETOOTH },
   { "GPS",           UI_ICON_SATELLITE },
   { "Clock & time",  UI_ICON_TIMER },
-  { "Battery",       UI_ICON_BATTERY_CHARGING },
+  { "Battery",       UI_ICON_BATTERY_FULL },
   { "Sensors",       UI_ICON_THERMOMETER },
   { "Display",       UI_ICON_SUN },
   { "Theme",         UI_ICON_PALETTE },
@@ -25273,16 +25274,17 @@ static uint16_t batteryMvSmoothed() {
 
 static int batteryPercentFromMv(uint16_t mv);   // fwd decl (icon derives from %)
 static const char* batteryGlyphForMv(uint16_t mv) {
-  if (mv == 0)               return LV_SYMBOL_BATTERY_EMPTY;
-  if (batteryIsCharging(mv)) return LV_SYMBOL_CHARGE;   // on USB power
-  // Derive the icon from the (calibrated) percent so custom packs whose full
-  // voltage differs from 4.2 V still fill the icon at their real 100%.
-  const int pct = batteryPercentFromMv(mv);
-  if (pct >= 90) return LV_SYMBOL_BATTERY_FULL;
-  if (pct >= 65) return LV_SYMBOL_BATTERY_3;
-  if (pct >= 40) return LV_SYMBOL_BATTERY_2;
-  if (pct >= 15) return LV_SYMBOL_BATTERY_1;
-  return LV_SYMBOL_BATTERY_EMPTY;
+  if (mv == 0) return LV_SYMBOL_BATTERY_EMPTY;
+  // Always derive the 5-step solid battery fill glyph from the calibrated percentage,
+  // even while charging, so the battery icon shows its fill bars rather than an empty outline.
+  return touchBatteryLevelGlyphForPct(batteryPercentFromMv(mv));
+}
+static uint32_t batteryColorForPct(int pct, bool charging) {
+  return touchBatteryColorForPct(pct, charging,
+                                 COLOR_HUE[HUE_DEVICE],
+                                 COLOR_STATUS_WARN,
+                                 COLOR_STATUS_DANGER_TEXT,
+                                 COLOR_SUB);
 }
 
 static int batteryPercentFromMv(uint16_t mv) {
@@ -42086,19 +42088,31 @@ static void onMapTabActivated() {
 // overlays the amber when power-save is on, so the map-chrome setter and the per-tick refresh share
 // one writer and never fight over the battery colour.
 static lv_color_t s_batt_base = lv_color_hex(COLOR_SUB);
-// MORE COLORS! colours the battery by its level off the map: green, amber below half,
-// red below a fifth, the glow while charging. 0..100, 1000 = charging, -1 unknown.
+static lv_color_t s_batt_pct_base = lv_color_hex(COLOR_SUB);
+// Battery level and charge state off the map: Green (>=50%), Orange (20..49%),
+// Red (<20%) whether charging or discharging. 0..100, +1000 while charging, -1 unknown.
 static int  s_batt_lvl = -1;
 static bool s_batt_on_map = false;
 static void applyBattColor() {
-  if (!g_statusbar.batt_icon) return;
-  lv_color_t c = s_batt_base;
-  if (s_look_more && !s_batt_on_map && s_batt_lvl >= 0)
-    c = lv_color_hex(s_batt_lvl >= 1000 ? COLOR_GLOW : s_batt_lvl >= 50 ? COLOR_HUE[HUE_DEVICE]
-                     : s_batt_lvl >= 20 ? COLOR_HUE[HUE_RADIO] : COLOR_STATUS_DANGER_TEXT);
-  if (touchSleep::enabled())
-    c = lv_color_hex(s_theme_high_contrast ? COLOR_TEXT : 0xFFD60A);
-  lv_obj_set_style_text_color(g_statusbar.batt_icon, c, LV_PART_MAIN);
+  const bool chg = s_batt_lvl >= 999;
+  const int  pct = chg ? (s_batt_lvl - 1000) : s_batt_lvl;
+  lv_color_t c_icon = s_batt_base;
+  lv_color_t c_pct  = s_batt_pct_base;
+  if (!s_batt_on_map && (pct >= 0 || chg)) {
+    const lv_color_t lvl_c = lv_color_hex(batteryColorForPct(pct, chg));
+    c_icon = lvl_c;
+    c_pct  = lvl_c;
+  }
+  if (touchSleep::enabled()) {
+    const lv_color_t saver_c = lv_color_hex(s_theme_high_contrast ? COLOR_TEXT : 0xFFD60A);
+#if CAP_ROUND_CORNERS
+    c_icon = saver_c;
+#else
+    c_pct  = saver_c;
+#endif
+  }
+  if (g_statusbar.batt_icon) lv_obj_set_style_text_color(g_statusbar.batt_icon, c_icon, LV_PART_MAIN);
+  if (g_statusbar.batt_pct)  lv_obj_set_style_text_color(g_statusbar.batt_pct,  c_pct,  LV_PART_MAIN);
 }
 
 // Immersive map chrome: on the Map tab the status bar, bottom info strip and
@@ -42138,10 +42152,10 @@ static void applyMapChrome(bool on) {
     const lv_color_t fg     = lv_color_hex(!on ? COLOR_TEXT : (light_map_chrome ? 0xF0F0F0 : 0x000000));
     const lv_color_t fg_sub = lv_color_hex(!on ? COLOR_SUB  : (light_map_chrome ? 0xC8CCD0 : 0x000000));
     if (g_statusbar.left_label) lv_obj_set_style_text_color(g_statusbar.left_label, fg, LV_PART_MAIN);
-    s_batt_base = on ? fg : lv_color_hex(COLOR_SUB);   // theme/map-driven battery colour...
-    s_batt_on_map = on;
-    applyBattColor();            // ...with the power-save amber overlaid if enabled
-    if (g_statusbar.batt_pct)   lv_obj_set_style_text_color(g_statusbar.batt_pct, fg_sub, LV_PART_MAIN);
+    s_batt_base     = on ? fg     : lv_color_hex(COLOR_SUB);   // theme/map-driven battery colour...
+    s_batt_pct_base = on ? fg_sub : lv_color_hex(COLOR_SUB);
+    s_batt_on_map   = on;
+    applyBattColor();            // ...with Green/Orange/Red level colour applied off-map
     if (g_statusbar.clock)      lv_obj_set_style_text_color(g_statusbar.clock, on ? fg_sub : lv_color_hex(COLOR_TEXT), LV_PART_MAIN);
     // The radio glyphs are quiet grey indicators off-map; on-map they join the rest of the
     // chrome in black/off-white, which the light OSM tiles need for legibility.
@@ -44177,6 +44191,12 @@ static uint32_t settingsCatHue(int c) {
     return lookRainbow(at, k);
   }
   switch (c) {
+#if CAP_BATTERY
+    case CAT_BATTERY: {
+      const uint16_t mv = batteryMvSmoothed();
+      return mv ? batteryColorForPct(batteryPercentFromMv(mv), batteryIsCharging(mv)) : COLOR_HUE[HUE_DEVICE];
+    }
+#endif
     case CAT_RADIO:                                        return COLOR_HUE[HUE_RADIO];
     case CAT_PROFILE: case CAT_AUTOADD: case CAT_QUICKREPLIES: return COLOR_HUE[HUE_MSG];
     case CAT_WIFI: case CAT_BLUETOOTH: case CAT_GPS: case CAT_MQTT: return COLOR_HUE[HUE_PLACE];
@@ -44248,7 +44268,7 @@ static void settingsCatValue(int c, char* out, size_t cap) {
 #if CAP_BATTERY
     case CAT_BATTERY: {
       const uint16_t mv = batteryMvSmoothed();
-      if (mv) snprintf(out, cap, "%d%%", batteryPercentFromMv(mv));
+      if (mv) touchBatteryFormatStatusPct(out, cap, batteryPercentFromMv(mv), batteryIsCharging(mv));
       break;
     }
 #endif
@@ -51979,8 +51999,7 @@ static void lockBattDrawCb(lv_event_t* e) {
   const lv_coord_t w = (lv_coord_t)(lv_area_get_width(&in) * pct / 100);
   if (w > 0) {
     in.x2 = (lv_coord_t)(in.x1 + w - 1);
-    if (chg) fd.bg_color = lv_color_hex(k.line);
-    else if (pct <= 15 && !k.paper) fd.bg_color = lv_color_hex(COLOR_STATUS_DANGER);
+    if (!k.paper) fd.bg_color = lv_color_hex(batteryColorForPct(pct, chg));
     lv_draw_rect(dc, &fd, &in);
   }
 }
@@ -52033,7 +52052,9 @@ static void lockscreenUpdateBattery() {
   lv_obj_clear_flag(s_lock_batt, LV_OBJ_FLAG_HIDDEN);
   // Show the bolt when charging, and always show the percentage when valid so
   // the user can track charge progress on the lock screen.
+  const uint32_t bcol = s_lock_ink.paper ? s_lock_ink.ter : batteryColorForPct(pct, charging);
   if (charging) {
+    lv_obj_set_style_text_color(s_lock_batt_chg, lv_color_hex(bcol), LV_PART_MAIN);
     lv_obj_clear_flag(s_lock_batt_chg, LV_OBJ_FLAG_HIDDEN);
   } else {
     lv_obj_add_flag(s_lock_batt_chg, LV_OBJ_FLAG_HIDDEN);
@@ -52042,6 +52063,7 @@ static void lockscreenUpdateBattery() {
     char b[8];
     snprintf(b, sizeof b, "%d%%", pct);
     lv_label_set_text(s_lock_batt_lbl, b);
+    lv_obj_set_style_text_color(s_lock_batt_lbl, lv_color_hex(bcol), LV_PART_MAIN);
     lv_obj_clear_flag(s_lock_batt_lbl, LV_OBJ_FLAG_HIDDEN);
   } else {
     lv_obj_add_flag(s_lock_batt_lbl, LV_OBJ_FLAG_HIDDEN);
@@ -57759,8 +57781,10 @@ static void openControlCenter() {
   // ---- Battery + Wi-Fi info (right) ----
   const uint16_t mv = batteryMvSmoothed();
   const int pct = batteryPercentFromMv(mv);
+  const bool chg = batteryIsCharging(mv);
+  const uint32_t bcol = s_theme_high_contrast ? COLOR_TEXT : batteryColorForPct(pct, chg);
   char batt_s[32];
-  if (batteryIsCharging(mv))
+  if (chg)
     snprintf(batt_s, sizeof batt_s, "%s %d%%  %u.%02uV", TR("Charging"),
              pct < 0 ? 0 : pct, (unsigned)(mv / 1000), (unsigned)((mv % 1000) / 10));
   else
@@ -57808,18 +57832,17 @@ static void openControlCenter() {
   lv_obj_set_flex_align(brow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_set_style_pad_column(brow, 4, LV_PART_MAIN);
   {
-    const bool chg = batteryIsCharging(mv);
+    char ic_s[16];
+    touchBatteryFormatIconWithCharge(ic_s, sizeof(ic_s), pct, chg);
     lv_obj_t* bic = lv_label_create(brow);
-    lv_label_set_text(bic, chg ? UI_ICON_BATTERY_CHARGING : pct >= 70 ? UI_ICON_BATTERY_FULL
-                         : pct >= 30 ? UI_ICON_BATTERY_MEDIUM : UI_ICON_BATTERY_LOW);
-    lv_obj_set_style_text_font(bic, &ui_icons_16, LV_PART_MAIN);
-    lv_obj_set_style_text_color(bic, lv_color_hex(s_theme_high_contrast ? COLOR_TEXT
-        : (!chg && pct >= 0 && pct < 15) ? COLOR_STATUS_DANGER : COLOR_HUE[HUE_DEVICE]), LV_PART_MAIN);
+    lv_label_set_text(bic, ic_s);
+    lv_obj_set_style_text_font(bic, &g_font_16, LV_PART_MAIN);
+    lv_obj_set_style_text_color(bic, lv_color_hex(bcol), LV_PART_MAIN);
   }
   lv_obj_t* bi = lv_label_create(brow);
   lv_label_set_text(bi, batt_s);
   lv_obj_set_style_text_font(bi, &g_font_12, LV_PART_MAIN);
-  lv_obj_set_style_text_color(bi, lv_color_hex(COLOR_SUB), LV_PART_MAIN);
+  lv_obj_set_style_text_color(bi, lv_color_hex(bcol), LV_PART_MAIN);
   int row_y = 42;   // first content row under the date / battery
   if (portrait) {
     lv_obj_align(brow, LV_ALIGN_TOP_LEFT, 0, 38);   // battery under the date
@@ -62263,7 +62286,7 @@ static void statusBarPackRight() {
   struct Slot { lv_obj_t* o; lv_coord_t gap; };   // gap: to the neighbour on its right
   const Slot order[] = {
     { g_statusbar.batt_icon,    0 },
-    { g_statusbar.batt_pct,     0 },
+    { g_statusbar.batt_pct,     SBX(3) },
     { g_statusbar.sig_box,      SBX(8) },
     { g_statusbar.conn_icon,    SBX(7) },
     { g_statusbar.ble_icon,     SBX(7) },
@@ -62905,23 +62928,25 @@ static void updateGlobalStatusBar() {
   static int s_last_pct = -9999;
   static bool s_last_charging = false;
   if (pct != s_last_pct || charging != s_last_charging) {
-    char buf[8];
-    if (pct < 0)        snprintf(buf, sizeof(buf), charging ? "" : "?");
-    else                snprintf(buf, sizeof(buf), "%d%%", pct);
+    char buf[16];
+    touchBatteryFormatStatusPct(buf, sizeof(buf), pct, charging);
     lv_label_set_text(g_statusbar.batt_pct, buf);
     s_last_pct = pct;
     s_last_charging = charging;
-    s_batt_lvl = charging ? 1000 : pct;
+    s_batt_lvl = charging ? (1000 + (pct >= 0 ? pct : -1)) : pct;
     applyBattColor();
   }
-  static const char* s_last_glyph = nullptr;
-  const char* g = charging ? UI_ICON_BATTERY_CHARGING : batteryGlyphForMv(mv);   // outline battery with a bolt
-  if (g != s_last_glyph) {
-    lv_label_set_text(g_statusbar.batt_icon, g);
-    s_last_glyph = g;
+  static char s_last_glyph[16] = {0};
+  char gbuf[16];
+#if CAP_ROUND_CORNERS
+  touchBatteryFormatIconWithCharge(gbuf, sizeof(gbuf), pct, charging);
+#else
+  snprintf(gbuf, sizeof(gbuf), "%s", batteryGlyphForMv(mv));
+#endif
+  if (strcmp(gbuf, s_last_glyph) != 0) {
+    lv_label_set_text(g_statusbar.batt_icon, gbuf);
+    snprintf(s_last_glyph, sizeof(s_last_glyph), "%s", gbuf);
   }
-  // Re-tint the battery amber/normal when idle power-save toggles (the toggle cb routes through
-  // here via updateGlobalStatusBar). Only on change, so no per-tick style churn.
   { static int s_last_pwr = -1;
     const int pwr = touchSleep::enabled() ? 1 : 0;
     if (pwr != s_last_pwr) { s_last_pwr = pwr; applyBattColor(); }
@@ -65254,19 +65279,18 @@ static void hwBatteryUpdate(int i) {
   const bool chg = mv && batteryIsCharging(mv);
   const int pct = mv ? batteryPercentFromMv(mv) : -1;
   HwFig* f = hwF(i);
-  const uint32_t col = chg ? COLOR_HUE[HUE_DEVICE] : pct >= 0 && pct <= 15 ? COLOR_STATUS_DANGER_TEXT
-                     : pct >= 0 && pct <= 30 ? COLOR_STATUS_WARN : COLOR_HUE[HUE_DEVICE];
+  const uint32_t col = batteryColorForPct(pct, chg);
   const int16_t val = pct < 0 ? 0 : (int16_t)(pct * 10);
   const bool ring_full = chg && pct < 0;
   if (f->value != val || f->ca != col || f->full != ring_full) { f->value = val; f->ca = col; f->full = ring_full; lv_obj_invalidate(w.fig); }
   const bool side = hwBattSideBySide(w, lv_obj_get_style_width(w.fig, LV_PART_MAIN));   // as hwBatteryBuild chose
-  char in[8] = "", v[20], a[28], b[64];
+  char in[8] = "", v[24], a[32], b[64];
   if (!chg) {
     if (pct >= 0) snprintf(in, sizeof in, side ? "%d%%" : "%d", pct);
     else snprintf(in, sizeof in, "?");
   }
   if (chg && w.size == HWS_S && pct >= 0)
-    snprintf(v, sizeof v, "%d%% %u.%02uV", pct, mv / 1000u, (mv % 1000u) / 10u);
+    snprintf(v, sizeof v, LV_SYMBOL_CHARGE " %d%% %u.%02uV", pct, mv / 1000u, (mv % 1000u) / 10u);
   else
     snprintf(v, sizeof v, "%u.%02u V", mv / 1000u, (mv % 1000u) / 10u);
 #if defined(TLORA_PAGER)
@@ -65278,7 +65302,7 @@ static void hwBatteryUpdate(int i) {
     snprintf(v, sizeof v, gi.current_ma > 0 ? "+%d mA" : "%d mA", ma);
   }
 #endif
-  const uint32_t h = hwHash(hwHashStr(hwHashStr(2166136261u, in), v), chg);
+  const uint32_t h = hwHash(hwHash(hwHashStr(hwHashStr(2166136261u, in), v), chg), col);
   if (h == w.memo && w.size == HWS_S) return;
   const bool changed = h != w.memo;
   w.memo = h;
@@ -65288,11 +65312,13 @@ static void hwBatteryUpdate(int i) {
     const lv_coord_t fr = lv_obj_get_style_width(w.fig, LV_PART_MAIN);
     if (chg) {
       lv_obj_add_flag(w.l[1], LV_OBJ_FLAG_HIDDEN);
+      lv_obj_set_style_text_color(w.l[4], lv_color_hex(col), LV_PART_MAIN);
       lv_obj_clear_flag(w.l[4], LV_OBJ_FLAG_HIDDEN);
       const int ih = hwLh(&ui_icons_16);
       lv_obj_set_pos(w.l[4], side ? fx + fr + SC(5) : fx + (fr - ih) / 2, fy + (fr - ih) / 2);
     } else {
       lv_obj_add_flag(w.l[4], LV_OBJ_FLAG_HIDDEN);
+      lv_obj_set_style_text_color(w.l[1], lv_color_hex(col), LV_PART_MAIN);
       lv_obj_clear_flag(w.l[1], LV_OBJ_FLAG_HIDDEN);
       lv_label_set_text(w.l[1], in);
       const lv_font_t* lf = lv_obj_get_style_text_font(w.l[1], LV_PART_MAIN);
@@ -65301,12 +65327,13 @@ static void hwBatteryUpdate(int i) {
     }
   }
   if (w.size == HWS_S) {
-    lv_label_set_text(w.l[2], v);   // the bolt in the ring already says charging
+    lv_label_set_text(w.l[2], v);
+    lv_obj_set_style_text_color(w.l[2], lv_color_hex(chg ? col : COLOR_SUB), LV_PART_MAIN);
     return;
   }
   if (chg) {
-    if (pct >= 0) snprintf(a, sizeof a, "%s %d%%", TR("Charging"), pct);
-    else          snprintf(a, sizeof a, "%s", TR("Charging"));
+    if (pct >= 0) snprintf(a, sizeof a, LV_SYMBOL_CHARGE " %s %d%%", TR("Charging"), pct);
+    else          snprintf(a, sizeof a, LV_SYMBOL_CHARGE " %s", TR("Charging"));
   }
   else if (pct >= 0) snprintf(a, sizeof a, "%d%%", pct);
   else snprintf(a, sizeof a, "%s", TR("No reading yet"));

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "Constellation.h"
 #include "device_caps.h"   // CAP_DATE_WRAP
+#include "../helpers/TouchBatteryUi.h"
 
 #include <initializer_list>
 #include <math.h>
@@ -455,7 +456,7 @@ void battDrawCb(lv_event_t* e) {
   const lv_coord_t w = (lv_coord_t)(lv_area_get_width(&f) * pct / 100);
   if (w > 0) {
     f.x2 = (lv_coord_t)(f.x1 + w - 1);
-    if (chg) fd.bg_color = C(s_th.glow);
+    fd.bg_color = C(touchBatteryColorForPct(pct, chg, 0x4CC38Au, 0xF2A33Au, 0xF06A6Eu, s_th.sub));
     lv_draw_rect(dc, &fd, &f);
   }
 }
@@ -1545,17 +1546,21 @@ void cstSetStatus(const CstStatus& s) {
       lv_obj_add_flag(s_batt, LV_OBJ_FLAG_HIDDEN);
     } else {
       lv_obj_clear_flag(s_batt, LV_OBJ_FLAG_HIDDEN);
-      // Charging: the bolt and the glow fill say it; the voltage under charge
-      // overstates the level, so no percentage then.
+      const uint32_t bcol = touchBatteryColorForPct(s.batt, s.charging, 0x4CC38Au, 0xF2A33Au, 0xF06A6Eu, s_th.sub);
       if (s.charging) {
+        lv_obj_set_style_text_color(s_batt_chg, C(bcol), 0);
         lv_obj_clear_flag(s_batt_chg, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_add_flag(s_batt_l, LV_OBJ_FLAG_HIDDEN);
       } else {
+        lv_obj_add_flag(s_batt_chg, LV_OBJ_FLAG_HIDDEN);
+      }
+      if (s.batt >= 0) {
         char b[8];
         snprintf(b, sizeof b, "%d%%", s.batt);
         lv_label_set_text(s_batt_l, b);
-        lv_obj_add_flag(s_batt_chg, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_style_text_color(s_batt_l, C(bcol), 0);
         lv_obj_clear_flag(s_batt_l, LV_OBJ_FLAG_HIDDEN);
+      } else {
+        lv_obj_add_flag(s_batt_l, LV_OBJ_FLAG_HIDDEN);
       }
       lv_obj_set_user_data(s_batt_i, (void*)(intptr_t)(s.charging ? 1000 + (s.batt < 0 ? 100 : s.batt) : s.batt));
       lv_obj_invalidate(s_batt_i);
