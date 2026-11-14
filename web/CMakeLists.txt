@@ -121,6 +121,7 @@ file(GLOB UI_SRCS CONFIGURE_DEPENDS ${UI}/*.cpp ${UI}/*.c)
 set(APP_SRCS
   ${UI_SRCS}
   ${SRC}/LvglPsramAlloc.cpp
+  ${SRC}/helpers/MeshtasticRadio.cpp
   ${SRC}/helpers/TouchDiagTrace.cpp
   ${SRC}/helpers/esp32/TouchPrefsStore.cpp
   ${SRC}/helpers/esp32/SdNvsPrefs.cpp

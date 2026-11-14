@@ -9,6 +9,7 @@
   #include "../MyMesh.h"
 #endif
 #include "../RegionDiscovery.h"
+#include "../helpers/MeshtasticRadio.h"
 
 #include "device_caps.h"   // CAP_* capability flags (replaces device-name #ifs)
 
@@ -33732,6 +33733,7 @@ static void openRemotePage() {
 #endif  // !HAS_TANMATSU
 
 static void openSpectrumPage() {
+  meshtasticRadioStop();
   closeSpectrumPage();
 #if defined(HAS_THINKNODE_M9)
   // A mesh transmit may be ON AIR right now: sends are asynchronous (startSendRaw
@@ -34217,9 +34219,10 @@ static void openSpectrumPage() {
   lv_obj_move_foreground(g_statusbar.root);   // keep the tall title bar above this page
 }
 
-// Read by main.cpp's loop(): true while the Spectrum app owns the radio, so the
-// mesh is paused (the_mesh.loop() skipped) and never re-tunes mid-sweep.
-bool spectrumOwnsRadio() { return s_spectrum_active; }
+// Read by main.cpp's loop(): true while the Spectrum app (or the Meshtastic
+// cross-play radio bridge) owns the radio, so the mesh is paused
+// (the_mesh.loop() skipped) and never re-tunes mid-slice.
+bool spectrumOwnsRadio() { return s_spectrum_active || meshtasticRadioOwnsHardware(); }
 
 // Status-bar unread badge (✉ N) → Chats inbox. Wired on the bar's left_label;
 // only fires while updateGlobalStatusBar has flagged the badge state CLICKABLE,
@@ -82872,6 +82875,8 @@ void UITask::loop() {
   // but if the page ever vanished without that, the mesh would stay off the
   // radio forever — so re-apply the mesh params and release ownership here.
   if (s_spectrum_active && !s_spec_root) spectrumRestoreRadio();
+  if (!luaAppIsOpen()) meshtasticRadioStop();
+  meshtasticRadioTick();
   uiCp("ui:hist");
   flushHistoryIfDue(now);
   uiCp("ui:ctdirty");
