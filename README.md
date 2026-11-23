@@ -140,6 +140,15 @@ credentials survive, not a merged image, which 0xFF-pads and wipes NVS.
 Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). One topic per
 PR; inbound contributions are accepted under the project's GPL-3.0 license.
 
+## Hardware & Open-Source Ecosystem Partners
+
+- **[AISLER](https://aisler.net)** — European ENIG PCB prototyping and SMD stencils for Sub-GHz solar repeater carrier boards.
+- **[PCBWay](https://www.pcbway.com)** — Open-source hardware PCB/PCBA prototyping and CNC 6061 aluminum field enclosures.
+- **[Heltec Automation](https://heltec.org)** — First-class target support for **Heltec Mesh Node T114 V2.0 (`nRF52840 + SX1262 + GPS`)** and **Heltec Vision Master E213** E-Ink nodes.
+- **[Volla Systeme](https://volla.online)** ([`github.com/hellovolla`](https://github.com/hellovolla)) — De-Googled sovereign mobile host integration (`Volla OS`, `Volla Phone Plinius Plus` modular radio interface, and `Volla Cell Mini` decentralized mesh networking).
+- **[Coilcraft](https://www.coilcraft.com)** (`XAL4020-222MEC`), **[Samtec](https://www.samtec.com)** (`TSW-110-07-G-S`), and **[WAGO](https://www.wago.com)** (`WAGO 221 Gelbox IPX8` & `2060` SMD terminals).
+- **[JetBrains](https://www.jetbrains.com/?from=TinkeringDao)** — Firmware engineering supported by JetBrains CLion and RustRover.
+
 ## License
 
 **GPL-3.0-or-later**: see [LICENSE](LICENSE). wadamesh is copyleft: anyone who
