@@ -140,6 +140,10 @@ credentials survive, not a merged image, which 0xFF-pads and wipes NVS.
 Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). One topic per
 PR; inbound contributions are accepted under the project's GPL-3.0 license.
 
+## Component Support
+
+- [Coilcraft](https://www.coilcraft.com) (`XAL4020-222MEC`), [Samtec](https://www.samtec.com) (`TSW-110-07-G-S`), and [WAGO](https://www.wago.com) (`221 + Gelbox IPX8` and `2060` SMD terminals).
+
 ## License
 
 **GPL-3.0-or-later**: see [LICENSE](LICENSE). wadamesh is copyleft: anyone who
